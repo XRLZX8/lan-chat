@@ -112,6 +112,9 @@ class LanChat:
         self.msg = scrolledtext.ScrolledText(tf, state="disabled",
             font=("Microsoft YaHei", 10), wrap=tk.WORD)
         self.msg.pack(fill="both", expand=True)
+        self.msg.bind("<Button-3>", self.on_msg_right_click)
+        self.msg_menu = tk.Menu(self.root, tearoff=0)
+        self.msg_menu.add_command(label="💾 存为表情包", command=self.save_img_as_sticker)
         self.pw.add(tf, height=350)
         bf = tk.Frame(self.pw)
         self.input = tk.Text(bf, height=4, font=("Microsoft YaHei", 10))
@@ -129,6 +132,8 @@ class LanChat:
                 command=lambda em=e: self._ins(em)).pack(side="left")
         tk.Button(emo, text="🖼️ 发图", font=("", 11), bd=1, relief=tk.RAISED,
             command=self._pick_img).pack(side="left", padx=4)
+        tk.Button(emo, text="📦 表情包", font=("", 11), bd=1, relief=tk.RAISED,
+            command=self.open_sticker_picker).pack(side="left", padx=2)
         self.sbtn = tk.Button(emo, text="发送", command=self.send,
             state="disabled", font=("", 9, "bold"), bg="#2196F3", fg="white")
         self.sbtn.pack(side="right", padx=4)
@@ -174,12 +179,12 @@ class LanChat:
         except: pass
 
     def _upd_users(self):
-        names = [self.my_name]
+        lines = [f"{self.my_name} (我)"]
         with self.lock:
             for p in self.peers.values():
-                if p["name"] not in names: names.append(p["name"])
-        self.ulb.config(text=f"👥 在线: {' · '.join(names)}")
-        self.online_lb.config(text=f"👥 {len(names)}人")
+                lines.append(f"{p['name']} ({p['ip']})")
+        self.ulb.config(text="👥 " + " | ".join(lines))
+        self.online_lb.config(text=f"👥 {len(lines)}人")
 
     # ==================== 主开关 ====================
     def toggle(self):
@@ -408,6 +413,60 @@ class LanChat:
         self.msg.see(tk.END)
         self.msg.config(state="disabled")
         self._last_img = fpath
+
+    # ==================== 表情包 ====================
+    def open_sticker_picker(self):
+        d = os.path.join(BASE(), "stickers")
+        os.makedirs(d, exist_ok=True)
+        files = sorted(os.listdir(d), reverse=True)
+        if not files:
+            self.log("💡 还没表情包，在图片上右键→存为表情包添加")
+            return
+        win = tk.Toplevel(self.root)
+        win.title("表情包"); win.geometry("520x400")
+        cv = tk.Canvas(win, bg="#f0f0f0")
+        sb = tk.Scrollbar(win, orient="vertical", command=cv.yview)
+        f = tk.Frame(cv, bg="#f0f0f0")
+        f.bind("<Configure>", lambda e: cv.configure(scrollregion=cv.bbox("all")))
+        cv.create_window((0, 0), window=f, anchor="nw")
+        cv.configure(yscrollcommand=sb.set)
+        cv.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        r = c = 0
+        for fn in files:
+            fp = os.path.join(d, fn)
+            try:
+                from PIL import Image, ImageTk
+                img = Image.open(fp)
+                img.thumbnail((80, 80), Image.LANCZOS)
+                photo = ImageTk.PhotoImage(img)
+                btn = tk.Button(f, image=photo, bd=1, relief=tk.RAISED,
+                    command=lambda p=fp: self.send_sticker(p))
+                btn.image = photo
+                btn.grid(row=r, column=c, padx=4, pady=4)
+                c += 1
+                if c > 4: c = 0; r += 1
+            except: continue
+
+    def send_sticker(self, fpath):
+        if not self.running: return
+        self._send_img(fpath)
+
+    def on_msg_right_click(self, event):
+        if self._last_img and os.path.exists(self._last_img):
+            self.msg_menu.tk_popup(event.x_root, event.y_root)
+
+    def save_img_as_sticker(self):
+        if not self._last_img or not os.path.exists(self._last_img):
+            self.log("❌ 没有可保存的图片"); return
+        dst = os.path.join(BASE(), "stickers", f"sticker_{int(time.time())}.png")
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        try:
+            from PIL import Image
+            Image.open(self._last_img).save(dst)
+            self.log("✅ 已保存表情包")
+        except Exception as e:
+            self.log(f"❌ 保存失败: {e}")
 
     # ==================== 停止 ====================
     def _stop(self):
