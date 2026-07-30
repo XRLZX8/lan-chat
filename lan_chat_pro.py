@@ -148,9 +148,11 @@ class LanChatPro:
                             command=lambda em=e: self.insert_emoji(em))
             btn.pack(side="left", padx=1)
         tk.Button(emo_frame, text="🖼️ 发图", font=("", 11),
-                  bd=0, command=self.send_image_dialog).pack(side="left", padx=4)
+                  bd=1, relief=tk.RAISED, bg="#E8E8E8",
+                  command=self.send_image_dialog).pack(side="left", padx=4)
         tk.Button(emo_frame, text="📦 表情包", font=("", 11),
-                  bd=0, command=self.open_sticker_picker).pack(side="left", padx=2)
+                  bd=1, relief=tk.RAISED, bg="#E8E8E8",
+                  command=self.open_sticker_picker).pack(side="left", padx=2)
         self.send_btn = tk.Button(emo_frame, text="发送",
                                   command=self.send_msg,
                                   state="disabled",
