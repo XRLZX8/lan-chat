@@ -34,3 +34,22 @@ jobs:
         with:
           name: LAN_Chat_Windows
           path: dist/LAN_Chat.exe
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/LAN_Chat.exe
+          generate_release_notes: true
+          name: LAN Chat ${{ github.ref_name }}
+          body: |
+            LAN Chat Pro - 局域网多人聊天工具
+
+            功能：
+            - 口令认证，IP+口令加入群聊
+            - 多人实时聊天
+            - Emoji 快捷发送
+            - 图片发送（支持粘贴/选择文件）
+            - 表情包收藏与发送
+            - 聊天记录本地保存
+            - 可拖拽调整输入框大小
