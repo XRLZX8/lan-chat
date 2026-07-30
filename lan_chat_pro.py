@@ -17,8 +17,9 @@ import time
 
 PORT = 8888
 BUFFER = 65536
+MAX_IMG_SIZE = 5 * 1024 * 1024  # 5MB
 
-# 获取正确的路径（兼容 PyInstaller）
+
 def get_base_dir():
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
@@ -30,12 +31,23 @@ IMG_DIR = os.path.join(get_base_dir(), "chat_images")
 QUICK_EMOJIS = ["😂","😅","😏","😎","😭","😡","🥴","🤔","👍","👎","❤️","🔥","💀","🎉","🚀","💪","🫡","🤣","😤","😈","🦞","🐶","🌚","💩"]
 
 
+def _recv_exact(sock, size):
+    """接收精确长度的数据"""
+    buf = b""
+    while len(buf) < size:
+        chunk = sock.recv(size - len(buf))
+        if not chunk:
+            return None
+        buf += chunk
+    return buf
+
+
 class LanChatPro:
     def __init__(self, root):
         self.root = root
         self.root.title("LAN Chat Pro")
-        self.root.geometry("680x600")
-        self.root.minsize(620, 520)
+        self.root.geometry("680x620")
+        self.root.minsize(620, 540)
 
         self.server_sock = None
         self.client_sock = None
@@ -81,19 +93,35 @@ class LanChatPro:
         self.online_label = tk.Label(info, text="👥 0人", fg="#888")
         self.online_label.pack(side="right")
 
-        # ===== 聊天区 =====
+        # ===== 可拖拽分割的主区域 =====
+        self.pw = tk.PanedWindow(root, orient=tk.VERTICAL, sashwidth=6,
+                                  sashrelief=tk.RAISED, bg="#333")
+        self.pw.pack(fill="both", padx=8, pady=(2, 2), expand=True)
+
+        # 上：聊天区
+        top_frame = tk.Frame(self.pw)
         self.msg_area = scrolledtext.ScrolledText(
-            root, state="disabled", height=18,
+            top_frame, state="disabled", height=18,
             font=("Microsoft YaHei", 10), wrap=tk.WORD)
-        self.msg_area.pack(fill="both", padx=8, pady=(2, 4), expand=True)
+        self.msg_area.pack(fill="both", expand=True)
         self.msg_area.bind("<Control-v>", self.on_paste_img)
+        self.pw.add(top_frame, height=350)
+
+        # 下：输入区
+        bottom_frame = tk.Frame(self.pw)
+        self.msg_entry = tk.Text(bottom_frame, height=4,
+                                 font=("Microsoft YaHei", 10))
+        self.msg_entry.pack(fill="both", expand=True, pady=(0, 0))
+        self.msg_entry.bind("<Return>", self.on_enter)
+        self.msg_entry.bind("<Shift-Return>", lambda e: None)
+        self.pw.add(bottom_frame, height=120)
 
         # ===== 在线用户 =====
         self.user_var = tk.StringVar(value="")
         tk.Label(root, textvariable=self.user_var, fg="#888",
                  anchor="w", font=("", 9)).pack(fill="x", padx=8)
 
-        # ===== 快捷表情 =====
+        # ===== 快捷表情 + 功能按钮 =====
         emo_frame = tk.Frame(root)
         emo_frame.pack(fill="x", padx=8, pady=(0, 2))
         for e in QUICK_EMOJIS:
@@ -101,29 +129,18 @@ class LanChatPro:
                             width=2, bd=0,
                             command=lambda em=e: self.insert_emoji(em))
             btn.pack(side="left", padx=1)
-        tk.Button(emo_frame, text="🖼️", font=("", 13),
-                  width=2, bd=0,
-                  command=self.send_image_dialog).pack(side="left", padx=2)
-
-        # ===== 输入框 =====
-        bottom = tk.Frame(root)
-        bottom.pack(fill="x", padx=8, pady=(0, 6))
-
-        self.msg_entry = tk.Text(bottom, height=2,
-                                 font=("Microsoft YaHei", 10))
-        self.msg_entry.pack(side="left", fill="x", expand=True)
-        self.msg_entry.bind("<Return>", self.on_enter)
-        self.msg_entry.bind("<Shift-Return>", lambda e: None)
-
-        self.send_btn = tk.Button(bottom, text="发送", width=7,
+        tk.Button(emo_frame, text="🖼️ 发图", font=("", 11),
+                  bd=0, command=self.send_image_dialog).pack(side="left", padx=4)
+        self.send_btn = tk.Button(emo_frame, text="发送",
                                   command=self.send_msg,
                                   state="disabled",
                                   font=("", 9, "bold"),
-                                  bg="#2196F3", fg="white")
-        self.send_btn.pack(side="right", padx=(4, 0))
+                                  bg="#2196F3", fg="white", padx=12)
+        self.send_btn.pack(side="right", padx=4)
 
         # ===== 状态栏 =====
-        self.status_bar = tk.Label(root, text="💡 建群 = 创建房间 | 加群 = 输入对方IP",
+        self.status_bar = tk.Label(root,
+                                   text="💡 建群 = 创建房间 | 加群 = 输入对方IP",
                                    fg="#666", anchor="w", font=("", 9))
         self.status_bar.pack(fill="x", padx=8, pady=(0, 4))
 
@@ -142,7 +159,7 @@ class LanChatPro:
             self.save_history(msg)
 
     def show_msg(self, sender, content):
-        ts = datetime.datetime.now().strftime("%m-%d %H:%M")
+        ts = datetime.datetime.now().strftime("%m-%d %H:%M:%S")
         self.log(f"[{ts}] {sender}: {content}")
 
     def set_status(self, text, color="#666"):
@@ -156,10 +173,6 @@ class LanChatPro:
         self.send_msg()
         return "break"
 
-    def on_mode_change(self):
-        if self.running:
-            self.disconnect()
-
     # ==================== 历史 ====================
     def load_history(self):
         if os.path.exists(HISTORY_FILE):
@@ -171,7 +184,7 @@ class LanChatPro:
 
     def save_history(self, line):
         self.history.append({
-            "t": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "t": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "m": line
         })
         if len(self.history) > 500:
@@ -242,7 +255,7 @@ class LanChatPro:
                 text="⏹ 关闭", bg="#f44336", state="normal"))
             self.root.after(0, lambda: self.send_btn.config(state="normal"))
             self.root.after(0, lambda: self.set_status(
-                f"🟢 群已创建 · 口令: {pwd} · 等待好友加入"))
+                f"🟢 群已创建 · 口令: {pwd}"))
             self.root.after(0, lambda: self.log(
                 f"🟢 群已创建，IP: {local_ip}  口令: {pwd}"))
             self.root.after(0, self.update_user_list)
@@ -257,11 +270,10 @@ class LanChatPro:
                     continue
                 except:
                     break
-
         except Exception as e:
             self.root.after(0, lambda: messagebox.showerror(
                 "服务端错误",
-                f"启动失败: {e}\n\n可能端口 {PORT} 已被占用，检查防火墙设置。"))
+                f"启动失败: {e}"))
             self.root.after(0, lambda: self.log(f"❌ 服务端错误: {e}"))
             self._disconnect()
 
@@ -288,21 +300,45 @@ class LanChatPro:
 
             while self.running:
                 try:
-                    data = client.recv(BUFFER).decode()
-                    if not data:
+                    hdr = _recv_exact(client, 4)
+                    if hdr is None:
                         break
-                    if data.startswith("MSG:"):
-                        content = data[4:]
+                    ptype = hdr.decode()
+                    if ptype == "MSG:":
+                        meta = _recv_exact(client, 8)
+                        if meta is None:
+                            break
+                        body_len = int(meta.decode().strip())
+                        body = _recv_exact(client, body_len)
+                        if body is None:
+                            break
+                        content = body.decode()
+                        ts = datetime.datetime.now().strftime("%m-%d %H:%M:%S")
                         self.root.after(0, lambda c=content,
-                                        n=client_name: self.show_msg(n, c))
-                        self._broadcast(
-                            f"{client_name}: {content}", exclude=client)
-                    elif data.startswith("IMG:"):
-                        parts = data.split(":", 3)
-                        if len(parts) == 4:
-                            _, ext, _, img_data = parts
-                            self._handle_image(client_name, ext, img_data)
-                            self._broadcast_raw(data, exclude=client)
+                                        n=client_name, t=ts:
+                                        self.log(f"[{t}] {n}: {c}"))
+                        self._broadcast_raw(
+                            f"MSG:{client_name}:{content}", exclude=client)
+
+                    elif ptype == "IMG:":
+                        meta = _recv_exact(client, 8)
+                        if meta is None:
+                            break
+                        total = int(meta.decode().strip())
+                        remain = total
+                        chunks = []
+                        while remain > 0:
+                            chunk = _recv_exact(
+                                client, min(BUFFER, remain))
+                            if chunk is None:
+                                break
+                            chunks.append(chunk)
+                            remain -= len(chunk)
+                        img_data = b"".join(chunks)
+                        self._handle_image_data(client_name, img_data)
+                        self._broadcast_raw(
+                            f"IMG:{client_name}:{total}:".encode()
+                            + img_data, exclude=client)
                 except:
                     break
         except:
@@ -352,11 +388,19 @@ class LanChatPro:
 
             while self.running:
                 try:
-                    data = sock.recv(BUFFER).decode()
-                    if not data:
+                    hdr = _recv_exact(sock, 4)
+                    if hdr is None:
                         break
-                    if data.startswith("MSG:"):
-                        content = data[4:]
+                    ptype = hdr.decode()
+                    if ptype == "MSG:":
+                        meta = _recv_exact(sock, 8)
+                        if meta is None:
+                            break
+                        body_len = int(meta.decode().strip())
+                        body = _recv_exact(sock, body_len)
+                        if body is None:
+                            break
+                        content = body.decode()
                         if ":" in content:
                             s, m = content.split(":", 1)
                             self.root.after(
@@ -365,11 +409,22 @@ class LanChatPro:
                         else:
                             self.root.after(
                                 0, lambda c=content: self.log(f"💬 {c}"))
-                    elif data.startswith("IMG:"):
-                        parts = data.split(":", 3)
-                        if len(parts) == 4:
-                            _, ext, _, img_data = parts
-                            self._handle_image("未知", ext, img_data)
+                    elif ptype == "IMG:":
+                        meta = _recv_exact(sock, 8)
+                        if meta is None:
+                            break
+                        total = int(meta.decode().strip())
+                        remain = total
+                        chunks = []
+                        while remain > 0:
+                            chunk = _recv_exact(
+                                sock, min(BUFFER, remain))
+                            if chunk is None:
+                                break
+                            chunks.append(chunk)
+                            remain -= len(chunk)
+                        img_data = b"".join(chunks)
+                        self._handle_image_data("未知", img_data)
                 except:
                     break
 
@@ -387,22 +442,26 @@ class LanChatPro:
 
     # ==================== 广播 ====================
     def _broadcast(self, msg, exclude=None):
-        with self.lock:
-            for sock, name in list(self.clients.items()):
-                if sock == exclude or sock == self.server_sock:
-                    continue
-                try:
-                    sock.sendall(f"MSG:{msg}".encode())
-                except:
-                    pass
-
-    def _broadcast_raw(self, raw, exclude=None):
+        raw = f"MSG:{self.nickname}:{msg}"
         with self.lock:
             for sock in list(self.clients.keys()):
                 if sock == exclude or sock == self.server_sock:
                     continue
                 try:
-                    sock.sendall(raw.encode())
+                    body = raw.encode()
+                    sock.sendall(b"MSG:" + f"{len(body):<8}".encode() + body)
+                except:
+                    pass
+
+    def _broadcast_raw(self, raw_binary, exclude=None):
+        with self.lock:
+            for sock in list(self.clients.keys()):
+                if sock == exclude or sock == self.server_sock:
+                    continue
+                try:
+                    if isinstance(raw_binary, str):
+                        raw_binary = raw_binary.encode()
+                    sock.sendall(raw_binary)
                 except:
                     pass
 
@@ -415,7 +474,7 @@ class LanChatPro:
         self.user_var.set(f"👥 在线: {' · '.join(names)}")
         self.online_label.config(text=f"👥 {len(names)}人")
 
-    # ==================== 发送 ====================
+    # ==================== 发送消息 ====================
     def send_msg(self):
         text = self.msg_entry.get("1.0", tk.END).strip()
         if not text or not self.running:
@@ -425,11 +484,12 @@ class LanChatPro:
         self.save_history(f"{self.nickname}: {text}")
 
         if self.is_server:
-            self._broadcast(f"{self.nickname}: {text}")
+            self._broadcast(text)
         else:
             try:
+                body = f"{self.nickname}:{text}".encode()
                 self.client_sock.sendall(
-                    f"MSG:{self.nickname}: {text}".encode())
+                    b"MSG:" + f"{len(body):<8}".encode() + body)
             except:
                 self.log("❌ 发送失败")
                 self._disconnect()
@@ -437,21 +497,28 @@ class LanChatPro:
     # ==================== 图片 ====================
     def send_image_dialog(self):
         if not self.running:
+            messagebox.showwarning("提示", "请先加入群聊")
             return
         path = filedialog.askopenfilename(
             title="选择图片",
-            filetypes=[("图片", "*.png *.jpg *.jpeg *.gif *.bmp")])
-        if path:
-            self._send_image_file(path)
+            filetypes=[
+                ("图片", "*.png *.jpg *.jpeg *.gif *.bmp"),
+                ("所有文件", "*.*")
+            ])
+        if not path:
+            return
+        size = os.path.getsize(path)
+        if size > MAX_IMG_SIZE:
+            messagebox.showerror("错误", f"图片太大（{size//1024}KB），最大支持5MB")
+            return
+        self._send_image_file(path)
 
     def on_paste_img(self, event):
         try:
             from PIL import ImageGrab
             img = ImageGrab.grabclipboard()
             if img:
-                path = os.path.join(
-                    IMG_DIR,
-                    f"paste_{int(time.time())}.png")
+                path = os.path.join(IMG_DIR, f"paste_{int(time.time())}.png")
                 img.save(path)
                 self._send_image_file(path)
                 return "break"
@@ -461,33 +528,38 @@ class LanChatPro:
     def _send_image_file(self, path):
         try:
             with open(path, "rb") as f:
-                data = base64.b64encode(f.read()).decode()
-            ext = os.path.splitext(path)[1].lower().replace(".", "")
-            payload = f"IMG:{ext}:{len(data)}:{data}"
+                img_bytes = f.read()
+            ext = os.path.splitext(path)[1].lower()
+            self.img_counter += 1
+            fname = f"sent_{int(time.time())}_{self.img_counter}{ext}"
+            fpath = os.path.join(IMG_DIR, fname)
+            with open(fpath, "wb") as f:
+                f.write(img_bytes)
+            self._show_image(self.nickname, fpath)
 
+            payload = b"IMG:" + f"{len(img_bytes):<8}".encode() + img_bytes
             if self.is_server:
-                self._show_image(self.nickname, path)
-                self._broadcast_raw(payload)
+                self._broadcast_raw(
+                    f"IMG:{self.nickname}:{len(img_bytes)}:".encode()
+                    + img_bytes, exclude=None)
             else:
-                self.client_sock.sendall(payload.encode())
-                self._show_image(self.nickname, path)
+                self.client_sock.sendall(payload)
         except Exception as e:
             self.log(f"❌ 图片发送失败: {e}")
 
-    def _handle_image(self, sender, ext, data_b64):
+    def _handle_image_data(self, sender, img_bytes):
         try:
-            img_data = base64.b64decode(data_b64)
             self.img_counter += 1
-            fname = f"img_{int(time.time())}_{self.img_counter}.{ext}"
+            fname = f"img_{int(time.time())}_{self.img_counter}.png"
             fpath = os.path.join(IMG_DIR, fname)
             with open(fpath, "wb") as f:
-                f.write(img_data)
+                f.write(img_bytes)
             self.root.after(0, lambda: self._show_image(sender, fpath))
         except Exception as e:
             self.root.after(0, lambda: self.log(f"❌ 图片接收失败: {e}"))
 
     def _show_image(self, sender, fpath):
-        ts = datetime.datetime.now().strftime("%m-%d %H:%M")
+        ts = datetime.datetime.now().strftime("%m-%d %H:%M:%S")
         self.log(f"[{ts}] {sender}: [图片] {os.path.basename(fpath)}")
         try:
             from PIL import Image, ImageTk
@@ -506,7 +578,7 @@ class LanChatPro:
             self.msg_area.config(state="disabled")
             self._images.append(photo)
         except ImportError:
-            self.log("   (需要 Pillow 显示图片: pip install Pillow)")
+            self.log("   (显示图片需安装: pip install Pillow)")
 
     # ==================== 断开 ====================
     def _disconnect(self):
