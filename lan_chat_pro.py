@@ -17,6 +17,7 @@ import time
 
 PORT = 8888
 BUFFER = 65536
+STICKER_DIR = os.path.join(get_base_dir(), "stickers")
 MAX_IMG_SIZE = 5 * 1024 * 1024  # 5MB
 
 
@@ -59,8 +60,10 @@ class LanChatPro:
         self.lock = threading.Lock()
         self.img_counter = 0
         self._images = []
+        self._last_img_path = None
 
         os.makedirs(IMG_DIR, exist_ok=True)
+        os.makedirs(STICKER_DIR, exist_ok=True)
         self.load_history()
 
         # ===== 顶部栏 =====
@@ -105,6 +108,10 @@ class LanChatPro:
             font=("Microsoft YaHei", 10), wrap=tk.WORD)
         self.msg_area.pack(fill="both", expand=True)
         self.msg_area.bind("<Control-v>", self.on_paste_img)
+        # 右键菜单
+        self.msg_area.bind("<Button-3>", self.on_msg_right_click)
+        self.msg_menu = tk.Menu(self.root, tearoff=0)
+        self.msg_menu.add_command(label="💾 存为表情包", command=self.save_last_img_as_sticker)
         self.pw.add(top_frame, height=350)
 
         # 下：输入区
@@ -131,6 +138,8 @@ class LanChatPro:
             btn.pack(side="left", padx=1)
         tk.Button(emo_frame, text="🖼️ 发图", font=("", 11),
                   bd=0, command=self.send_image_dialog).pack(side="left", padx=4)
+        tk.Button(emo_frame, text="📦 表情包", font=("", 11),
+                  bd=0, command=self.open_sticker_picker).pack(side="left", padx=2)
         self.send_btn = tk.Button(emo_frame, text="发送",
                                   command=self.send_msg,
                                   state="disabled",
@@ -321,23 +330,24 @@ class LanChatPro:
                             f"MSG:{client_name}:{content}", exclude=client)
 
                     elif ptype == "IMG:":
-                        meta = _recv_exact(client, 8)
-                        if meta is None:
-                            break
-                        total = int(meta.decode().strip())
-                        remain = total
+                        name_len = int(_recv_exact(client, 8).decode().strip())
+                        sender_name = _recv_exact(client, name_len).decode()
+                        data_len = int(_recv_exact(client, 8).decode().strip())
+                        remain = data_len
                         chunks = []
                         while remain > 0:
-                            chunk = _recv_exact(
-                                client, min(BUFFER, remain))
+                            chunk = _recv_exact(client, min(BUFFER, remain))
                             if chunk is None:
                                 break
                             chunks.append(chunk)
                             remain -= len(chunk)
                         img_data = b"".join(chunks)
-                        self._handle_image_data(client_name, img_data)
+                        self._handle_image_data(sender_name, img_data)
+                        # 转发给其他人（包含发送者信息）
                         self._broadcast_raw(
-                            f"IMG:{client_name}:{total}:".encode()
+                            b"IMG:" + f"{len(sender_name):<8}".encode()
+                            + sender_name.encode()
+                            + f"{data_len:<8}".encode()
                             + img_data, exclude=client)
                 except:
                     break
@@ -410,11 +420,10 @@ class LanChatPro:
                             self.root.after(
                                 0, lambda c=content: self.log(f"💬 {c}"))
                     elif ptype == "IMG:":
-                        meta = _recv_exact(sock, 8)
-                        if meta is None:
-                            break
-                        total = int(meta.decode().strip())
-                        remain = total
+                        name_len = int(_recv_exact(sock, 8).decode().strip())
+                        sender_name = _recv_exact(sock, name_len).decode()
+                        data_len = int(_recv_exact(sock, 8).decode().strip())
+                        remain = data_len
                         chunks = []
                         while remain > 0:
                             chunk = _recv_exact(
@@ -424,7 +433,7 @@ class LanChatPro:
                             chunks.append(chunk)
                             remain -= len(chunk)
                         img_data = b"".join(chunks)
-                        self._handle_image_data("未知", img_data)
+                        self._handle_image_data(sender_name, img_data)
                 except:
                     break
 
@@ -537,11 +546,10 @@ class LanChatPro:
                 f.write(img_bytes)
             self._show_image(self.nickname, fpath)
 
-            payload = b"IMG:" + f"{len(img_bytes):<8}".encode() + img_bytes
+            payload = b"IMG:" + f"{len(self.nickname):<8}".encode() \
+                      + self.nickname.encode() + f"{len(img_bytes):<8}".encode() + img_bytes
             if self.is_server:
-                self._broadcast_raw(
-                    f"IMG:{self.nickname}:{len(img_bytes)}:".encode()
-                    + img_bytes, exclude=None)
+                self._broadcast_raw(payload, exclude=None)
             else:
                 self.client_sock.sendall(payload)
         except Exception as e:
@@ -579,6 +587,76 @@ class LanChatPro:
             self._images.append(photo)
         except ImportError:
             self.log("   (显示图片需安装: pip install Pillow)")
+        self._last_img_path = fpath
+
+    # ==================== 表情包 ====================
+    def on_msg_right_click(self, event):
+        """右键菜单"""
+        if self._last_img_path and os.path.exists(self._last_img_path):
+            self.msg_menu.tk_popup(event.x_root, event.y_root)
+
+    def save_last_img_as_sticker(self):
+        """把最后一张收到的图片存为表情包"""
+        if not self._last_img_path or not os.path.exists(self._last_img_path):
+            self.log("❌ 没有可保存的图片")
+            return
+        fname = f"sticker_{int(time.time())}.png"
+        dst = os.path.join(STICKER_DIR, fname)
+        try:
+            from PIL import Image
+            img = Image.open(self._last_img_path)
+            img.save(dst)
+            self.log(f"✅ 已保存表情包: {fname}")
+        except Exception as e:
+            self.log(f"❌ 保存失败: {e}")
+
+    def open_sticker_picker(self):
+        """打开表情包选择窗口"""
+        files = sorted(os.listdir(STICKER_DIR), reverse=True)
+        if not files:
+            self.log("💡 还没表情包，在图片上右键→「存为表情包」添加")
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("表情包")
+        win.geometry("520x400")
+
+        canvas = tk.Canvas(win, bg="#f0f0f0")
+        scroll = tk.Scrollbar(win, orient="vertical", command=canvas.yview)
+        frame = tk.Frame(canvas, bg="#f0f0f0")
+
+        frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=frame, anchor="nw")
+        canvas.configure(yscrollcommand=scroll.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+
+        row = 0
+        col = 0
+        for fname in files:
+            fpath = os.path.join(STICKER_DIR, fname)
+            try:
+                from PIL import Image, ImageTk
+                img = Image.open(fpath)
+                img.thumbnail((80, 80), Image.LANCZOS)
+                photo = ImageTk.PhotoImage(img)
+                btn = tk.Button(frame, image=photo, bd=1, relief=tk.RAISED,
+                                command=lambda p=fpath: self.send_sticker(p))
+                btn.image = photo
+                btn.grid(row=row, column=col, padx=4, pady=4)
+                col += 1
+                if col > 4:
+                    col = 0
+                    row += 1
+            except:
+                continue
+
+    def send_sticker(self, fpath):
+        """发送选中的表情包"""
+        if not self.running:
+            return
+        self._send_image_file(fpath)
 
     # ==================== 断开 ====================
     def _disconnect(self):
