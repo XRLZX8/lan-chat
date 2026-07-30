@@ -27,6 +27,7 @@ def get_base_dir():
 
 STICKER_DIR = os.path.join(get_base_dir(), "stickers")
 HISTORY_FILE = os.path.join(get_base_dir(), "lan_chat_history.json")
+CONFIG_FILE = os.path.join(get_base_dir(), "lan_chat_config.json")
 IMG_DIR = os.path.join(get_base_dir(), "chat_images")
 
 QUICK_EMOJIS = ["😂","😅","😏","😎","😭","😡","🥴","🤔","👍","👎","❤️","🔥","💀","🎉","🚀","💪","🫡","🤣","😤","😈","🦞","🐶","🌚","💩"]
@@ -76,6 +77,7 @@ class LanChatPro:
         os.makedirs(IMG_DIR, exist_ok=True)
         os.makedirs(STICKER_DIR, exist_ok=True)
         self.load_history()
+        self.load_config()
 
         # ===== 顶部栏 =====
         top = tk.Frame(root)
@@ -83,7 +85,7 @@ class LanChatPro:
 
         tk.Label(top, text="昵称:").pack(side="left")
         self.name_entry = tk.Entry(top, width=10)
-        self.name_entry.pack(side="left", padx=(2, 6))
+        self.name_entry.pack(side="left", padx=(2, 4))
         self.name_entry.insert(0, self.nickname)
 
         self.mode_var = tk.StringVar(value="server")
@@ -92,11 +94,15 @@ class LanChatPro:
         tk.Radiobutton(top, text="🔗 加群", variable=self.mode_var,
                        value="client").pack(side="left")
 
+        self.reconnect_btn = tk.Button(top, text="🔄 上次的群", font=("", 8),
+                                       command=self.quick_reconnect,
+                                       bd=1, relief=tk.RAISED)
+        self.reconnect_btn.pack(side="right", padx=2)
         self.connect_btn = tk.Button(top, text="🚀 启动",
                                      command=self.do_connect,
                                      bg="#4CAF50", fg="white",
                                      font=("", 9, "bold"))
-        self.connect_btn.pack(side="right", padx=4)
+        self.connect_btn.pack(side="right", padx=2)
 
         # ===== 信息栏 =====
         info = tk.Frame(root)
@@ -252,6 +258,71 @@ class LanChatPro:
         except:
             pass
 
+    # ==================== 群组记忆 ====================
+    def load_config(self):
+        """加载上次的群组配置"""
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, "r") as f:
+                    cfg = json.load(f)
+                self.name_entry.delete(0, tk.END)
+                self.name_entry.insert(0, cfg.get("nickname", self.nickname))
+                if cfg.get("mode") == "client" and cfg.get("ip"):
+                    self.mode_var.set("client")
+                    self._saved_ip = cfg["ip"]
+                    self._saved_pwd = cfg.get("pwd", "")
+                elif cfg.get("mode") == "server" and cfg.get("pwd"):
+                    self.mode_var.set("server")
+                    self._saved_pwd = cfg.get("pwd", "")
+                else:
+                    self._saved_ip = ""
+                    self._saved_pwd = ""
+            except:
+                self._saved_ip = ""
+                self._saved_pwd = ""
+        else:
+            self._saved_ip = ""
+            self._saved_pwd = ""
+
+    def save_config(self, mode, ip="", pwd=""):
+        """保存群组配置"""
+        cfg = {
+            "nickname": self.name_entry.get().strip() or self.nickname,
+            "mode": mode,
+            "ip": ip,
+            "pwd": pwd
+        }
+        try:
+            with open(CONFIG_FILE, "w") as f:
+                json.dump(cfg, f)
+        except:
+            pass
+
+    def quick_reconnect(self):
+        """一键重连到上次的群组"""
+        if not hasattr(self, '_saved_pwd') or not self._saved_pwd:
+            self.log("💡 没有可用的历史群组，请手动创建或加入")
+            return
+        self.nickname = self.name_entry.get().strip()
+        if not self.nickname:
+            messagebox.showerror("错误", "请输入昵称")
+            return
+        self.name_entry.config(state="readonly")
+        self.connect_btn.config(state="disabled")
+
+        if self.mode_var.get() == "server":
+            threading.Thread(target=self._start_server,
+                             args=(self._saved_pwd,), daemon=True).start()
+        else:
+            ip = getattr(self, '_saved_ip', '')
+            if not ip:
+                self.log("❌ 没有保存的 IP 地址")
+                self.name_entry.config(state="normal")
+                self.connect_btn.config(state="normal")
+                return
+            threading.Thread(target=self._start_client,
+                             args=(ip, self._saved_pwd), daemon=True).start()
+
     # ==================== 连接 ====================
     def do_connect(self):
         if self.running:
@@ -272,6 +343,7 @@ class LanChatPro:
                 return
             self.name_entry.config(state="readonly")
             self.connect_btn.config(state="disabled")
+            self.save_config("server", pwd=pwd)
             threading.Thread(target=self._start_server,
                              args=(pwd,), daemon=True).start()
         else:
@@ -285,6 +357,7 @@ class LanChatPro:
                 return
             self.name_entry.config(state="readonly")
             self.connect_btn.config(state="disabled")
+            self.save_config("client", ip=ip, pwd=pwd)
             threading.Thread(target=self._start_client,
                              args=(ip.strip(), pwd), daemon=True).start()
 
