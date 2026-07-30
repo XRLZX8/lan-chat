@@ -587,7 +587,7 @@ class LanChatPro:
             fpath = os.path.join(IMG_DIR, fname)
             with open(fpath, "wb") as f:
                 f.write(img_bytes)
-            self._show_image(self.nickname, fpath)
+            self._process_and_show_image(self.nickname, fpath)
 
             payload = b"IMG:" + f"{len(self.nickname):<8}".encode() \
                       + self.nickname.encode() + f"{len(img_bytes):<8}".encode() + img_bytes
