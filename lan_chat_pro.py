@@ -168,11 +168,27 @@ class LanChat:
         ip_scroll.pack(side="right", fill="y")
         self.ip_listbox.configure(yscrollcommand=ip_scroll.set)
 
-        # ===== 聊天区 =====
-        self.msg_area = scrolledtext.ScrolledText(root, state="disabled",
+        # ===== 聊天区（可拖拽） =====
+        self.pw = tk.PanedWindow(root, orient=tk.VERTICAL, sashwidth=6,
+                                  sashrelief=tk.RAISED, bg="#333")
+        self.pw.pack(fill="both", padx=8, pady=(2, 2), expand=True)
+
+        top_frame = tk.Frame(self.pw)
+        self.msg_area = scrolledtext.ScrolledText(top_frame, state="disabled",
             height=16, font=("Microsoft YaHei", 10), wrap=tk.WORD)
-        self.msg_area.pack(fill="both", padx=8, pady=(2, 2), expand=True)
+        self.msg_area.pack(fill="both", expand=True)
         self.msg_area.bind("<Control-v>", self.on_paste_img)
+        self.msg_area.bind("<Button-3>", self.on_msg_right_click)
+        self.msg_menu = tk.Menu(self.root, tearoff=0)
+        self.msg_menu.add_command(label="💾 存为表情包", command=self.save_img_as_sticker)
+        self.pw.add(top_frame, height=350)
+
+        bottom_frame = tk.Frame(self.pw)
+        self.msg_entry = tk.Text(bottom_frame, height=4, font=("Microsoft YaHei", 10))
+        self.msg_entry.pack(fill="both", expand=True)
+        self.msg_entry.bind("<Return>", lambda e: self.send_msg() or "break")
+        self.msg_entry.bind("<Shift-Return>", lambda e: None)
+        self.pw.add(bottom_frame, height=100)
 
         # ===== 在线用户 =====
         self.user_var = tk.StringVar(value="")
@@ -189,15 +205,11 @@ class LanChat:
             btn.pack(side="left", padx=1)
         tk.Button(emo_frame, text="🖼️ 发图", font=("", 11), bd=1, relief=tk.RAISED,
             command=self.send_image_dialog).pack(side="left", padx=4)
+        tk.Button(emo_frame, text="📦 表情包", font=("", 11), bd=1, relief=tk.RAISED,
+            command=self.open_sticker_picker).pack(side="left", padx=2)
         self.send_btn = tk.Button(emo_frame, text="发送", command=self.send_msg,
             state="disabled", font=("", 9, "bold"), bg="#2196F3", fg="white", padx=12)
         self.send_btn.pack(side="right", padx=4)
-
-        # ===== 输入框 =====
-        self.msg_entry = tk.Text(root, height=3, font=("Microsoft YaHei", 10))
-        self.msg_entry.pack(fill="x", padx=8, pady=(0, 4))
-        self.msg_entry.bind("<Return>", lambda e: self.send_msg() or "break")
-        self.msg_entry.bind("<Shift-Return>", lambda e: None)
 
         # ===== 状态栏 =====
         self.status_bar = tk.Label(root, text="💡 启动后自动建群，扫描可发现同一网段的其他用户",
@@ -637,6 +649,67 @@ class LanChat:
         self.msg_area.config(state="disabled")
         self._images.append(photo)
         self._last_img_path = fpath
+
+    # ==================== 表情包 ====================
+    def open_sticker_picker(self):
+        STICKER_DIR = os.path.join(get_base_dir(), "stickers")
+        os.makedirs(STICKER_DIR, exist_ok=True)
+        files = sorted(os.listdir(STICKER_DIR), reverse=True)
+        if not files:
+            self.log("💡 还没表情包，在图片上右键→「存为表情包」添加")
+            return
+        win = tk.Toplevel(self.root)
+        win.title("表情包")
+        win.geometry("520x400")
+        canvas = tk.Canvas(win, bg="#f0f0f0")
+        scroll = tk.Scrollbar(win, orient="vertical", command=canvas.yview)
+        frame = tk.Frame(canvas, bg="#f0f0f0")
+        frame.bind("<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=frame, anchor="nw")
+        canvas.configure(yscrollcommand=scroll.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        row = col = 0
+        for fname in files:
+            fpath = os.path.join(STICKER_DIR, fname)
+            try:
+                from PIL import Image, ImageTk
+                img = Image.open(fpath)
+                img.thumbnail((80, 80), Image.LANCZOS)
+                photo = ImageTk.PhotoImage(img)
+                btn = tk.Button(frame, image=photo, bd=1, relief=tk.RAISED,
+                    command=lambda p=fpath: self.send_sticker(p))
+                btn.image = photo
+                btn.grid(row=row, column=col, padx=4, pady=4)
+                col += 1
+                if col > 4:
+                    col = 0
+                    row += 1
+            except:
+                continue
+
+    def send_sticker(self, fpath):
+        if not self.running:
+            return
+        self._send_image_file(fpath)
+
+    def on_msg_right_click(self, event):
+        if self._last_img_path and os.path.exists(self._last_img_path):
+            self.msg_menu.tk_popup(event.x_root, event.y_root)
+
+    def save_img_as_sticker(self):
+        if not self._last_img_path or not os.path.exists(self._last_img_path):
+            self.log("❌ 没有可保存的图片")
+            return
+        dst = os.path.join(get_base_dir(), "stickers", f"sticker_{int(time.time())}.png")
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        try:
+            from PIL import Image
+            Image.open(self._last_img_path).save(dst)
+            self.log(f"✅ 已保存表情包")
+        except Exception as e:
+            self.log(f"❌ 保存失败: {e}")
 
     # ==================== 断开 ====================
     def _disconnect(self):
