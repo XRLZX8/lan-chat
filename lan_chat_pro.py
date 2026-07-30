@@ -14,6 +14,7 @@ import datetime
 import json
 import base64
 import time
+import logging
 
 PORT = 8888
 BUFFER = 65536
@@ -31,6 +32,19 @@ CONFIG_FILE = os.path.join(get_base_dir(), "lan_chat_config.json")
 IMG_DIR = os.path.join(get_base_dir(), "chat_images")
 
 QUICK_EMOJIS = ["😂","😅","😏","😎","😭","😡","🥴","🤔","👍","👎","❤️","🔥","💀","🎉","🚀","💪","🫡","🤣","😤","😈","🦞","🐶","🌚","💩"]
+
+# 日志
+LOG_FILE = os.path.join(get_base_dir(), "lan_chat.log")
+logging.basicConfig(
+    filename=LOG_FILE,
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+logging.info("=" * 40)
+logging.info("LAN Chat Pro 启动")
+logging.info(f"Python: {sys.version}")
+logging.info(f"系统: {sys.platform}")
 
 
 def _recv_exact(sock, size, timeout=5):
@@ -329,6 +343,7 @@ class LanChatPro:
             self._disconnect()
             return
         self.nickname = self.name_entry.get().strip()
+        logging.info(f"用户点击连接 - 昵称:{self.nickname} 模式:{self.mode_var.get()}")
         if not self.nickname:
             messagebox.showerror("错误", "请输入昵称")
             return
@@ -363,6 +378,7 @@ class LanChatPro:
 
     # ==================== 服务端 ====================
     def _start_server(self, pwd):
+        logging.info("服务端启动中...")
         pwd_hash = hashlib.sha256(pwd.encode()).hexdigest()
         local_ip = self.get_local_ip()
         try:
@@ -389,6 +405,7 @@ class LanChatPro:
             self.root.after(0, lambda: self.log(
                 f"🟢 群已创建，IP: {local_ip}  口令: {pwd}"))
             self.root.after(0, self.update_user_list)
+            logging.info(f"服务端启动成功 IP:{local_ip}")
 
             while self.running:
                 try:
@@ -408,6 +425,7 @@ class LanChatPro:
             self._disconnect()
 
     def _handle_client(self, client, addr, pwd_hash):
+        logging.info(f"新客户端连接 {addr[0]}:{addr[1]}")
         client.settimeout(10)
         try:
             data = client.recv(BUFFER).decode()
@@ -490,6 +508,7 @@ class LanChatPro:
 
     # ==================== 客户端 ====================
     def _start_client(self, ip, pwd):
+        logging.info(f"客户端启动 目标IP:{ip}")
         pwd_hash = hashlib.sha256(pwd.encode()).hexdigest()
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -799,6 +818,7 @@ class LanChatPro:
 
     # ==================== 断开 ====================
     def _disconnect(self):
+        logging.info("断开连接")
         self.running = False
         self.is_server = False
         with self.lock:
