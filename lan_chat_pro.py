@@ -247,6 +247,9 @@ class LanChat:
             nl = int(recv_n(c, 4).decode().strip())
             nm = recv_n(c, nl).decode()
             c.sendall(b"OK")
+            # 把自己的名字也发过去，让客户端能显示
+            nb = self.my_name.encode()
+            c.sendall(f"{len(nb):<4}".encode() + nb)
             with self.lock: self.peers[c] = {"name": nm, "ip": ip}
             self.root.after(0, lambda: self.log(f"🔗 {nm}({ip}) 加入了"))
             self.root.after(0, self._upd_users)
@@ -296,7 +299,10 @@ class LanChat:
             s.sendall(b"NICK" + f"{len(nb):<4}".encode() + nb)
             if recv_n(s, 2) is None:
                 s.close(); return
-            with self.lock: self.peers[s] = {"name": "?", "ip": ip}
+            # 读取服务端的用户名
+            nl = int(recv_n(s, 4).decode().strip())
+            nm = recv_n(s, nl).decode()
+            with self.lock: self.peers[s] = {"name": nm, "ip": ip}
             self.root.after(0, lambda: self.log(f"🔗 已连接 {ip}"))
             self.root.after(0, self._upd_users)
 
