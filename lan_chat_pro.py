@@ -139,26 +139,55 @@ class LanChatPro:
         tk.Label(root, textvariable=self.user_var, fg="#888",
                  anchor="w", font=("", 9)).pack(fill="x", padx=8)
 
-        # ===== 快捷表情 + 功能按钮 =====
+        # ===== 快捷表情（可滚动）+ 功能按钮 =====
         emo_frame = tk.Frame(root)
         emo_frame.pack(fill="x", padx=8, pady=(0, 2))
+
+        # 左：可水平滚动的表情栏
+        emo_scroll_frame = tk.Frame(emo_frame)
+        emo_scroll_frame.pack(side="left", fill="x", expand=True)
+
+        emo_canvas = tk.Canvas(emo_scroll_frame, height=32, bd=0,
+                               highlightthickness=0)
+        emo_scroll = tk.Scrollbar(emo_scroll_frame, orient="horizontal",
+                                  command=emo_canvas.xview)
+        emo_canvas.configure(xscrollcommand=emo_scroll.set)
+
+        emo_inner = tk.Frame(emo_canvas)
+        emo_inner.bind("<Configure>",
+                       lambda e: emo_canvas.configure(scrollregion=emo_canvas.bbox("all")))
+        emo_canvas.create_window((0, 0), window=emo_inner, anchor="nw")
+
+        emo_canvas.pack(side="top", fill="x")
+        emo_scroll.pack(side="bottom", fill="x")
+
         for e in QUICK_EMOJIS:
-            btn = tk.Button(emo_frame, text=e, font=("", 13),
+            btn = tk.Button(emo_inner, text=e, font=("", 13),
                             width=2, bd=0,
                             command=lambda em=e: self.insert_emoji(em))
             btn.pack(side="left", padx=1)
-        tk.Button(emo_frame, text="🖼️ 发图", font=("", 11),
+
+        # 绑定滚轮事件
+        def on_emo_scroll(event):
+            emo_canvas.xview_scroll(-1 if event.delta > 0 else 1, "units")
+        emo_canvas.bind("<Enter>", lambda e: emo_canvas.bind_all("<MouseWheel>", on_emo_scroll))
+        emo_canvas.bind("<Leave>", lambda e: emo_canvas.unbind_all("<MouseWheel>"))
+
+        # 右：功能按钮
+        btn_frame = tk.Frame(emo_frame)
+        btn_frame.pack(side="right", padx=(4, 0))
+        tk.Button(btn_frame, text="🖼️ 发图", font=("", 11),
                   bd=1, relief=tk.RAISED, bg="#E8E8E8",
-                  command=self.send_image_dialog).pack(side="left", padx=4)
-        tk.Button(emo_frame, text="📦 表情包", font=("", 11),
+                  command=self.send_image_dialog).pack(side="left", padx=1)
+        tk.Button(btn_frame, text="📦 表情包", font=("", 11),
                   bd=1, relief=tk.RAISED, bg="#E8E8E8",
-                  command=self.open_sticker_picker).pack(side="left", padx=2)
-        self.send_btn = tk.Button(emo_frame, text="发送",
+                  command=self.open_sticker_picker).pack(side="left", padx=1)
+        self.send_btn = tk.Button(btn_frame, text="发送",
                                   command=self.send_msg,
                                   state="disabled",
                                   font=("", 9, "bold"),
                                   bg="#2196F3", fg="white", padx=12)
-        self.send_btn.pack(side="right", padx=4)
+        self.send_btn.pack(side="left", padx=2)
 
         # ===== 状态栏 =====
         self.status_bar = tk.Label(root,
