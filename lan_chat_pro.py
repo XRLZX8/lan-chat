@@ -32,14 +32,25 @@ IMG_DIR = os.path.join(get_base_dir(), "chat_images")
 QUICK_EMOJIS = ["😂","😅","😏","😎","😭","😡","🥴","🤔","👍","👎","❤️","🔥","💀","🎉","🚀","💪","🫡","🤣","😤","😈","🦞","🐶","🌚","💩"]
 
 
-def _recv_exact(sock, size):
-    """接收精确长度的数据"""
+def _recv_exact(sock, size, timeout=5):
+    """接收精确长度的数据（带超时）"""
+    sock.settimeout(timeout)
     buf = b""
-    while len(buf) < size:
-        chunk = sock.recv(size - len(buf))
-        if not chunk:
-            return None
-        buf += chunk
+    try:
+        while len(buf) < size:
+            chunk = sock.recv(size - len(buf))
+            if not chunk:
+                return None
+            buf += chunk
+    except socket.timeout:
+        return None
+    except:
+        return None
+    finally:
+        try:
+            sock.settimeout(None)
+        except:
+            pass
     return buf
 
 
@@ -287,6 +298,7 @@ class LanChatPro:
             self._disconnect()
 
     def _handle_client(self, client, addr, pwd_hash):
+        client.settimeout(10)
         try:
             data = client.recv(BUFFER).decode()
             parts = data.split(":", 2)
