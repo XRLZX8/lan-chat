@@ -17,7 +17,6 @@ import time
 
 PORT = 8888
 BUFFER = 65536
-STICKER_DIR = os.path.join(get_base_dir(), "stickers")
 MAX_IMG_SIZE = 5 * 1024 * 1024  # 5MB
 
 
@@ -26,6 +25,7 @@ def get_base_dir():
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 
+STICKER_DIR = os.path.join(get_base_dir(), "stickers")
 HISTORY_FILE = os.path.join(get_base_dir(), "lan_chat_history.json")
 IMG_DIR = os.path.join(get_base_dir(), "chat_images")
 
