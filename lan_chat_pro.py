@@ -1,64 +1,50 @@
 """
-LAN Chat Pro - 局域网聊天工具（多人版）
-口令认证 · 表情包 · 图片 · 历史记录
+LAN Chat - 局域网聊天工具
+自动发现 · 无需口令 · 本地日志
 """
 
 import socket
 import threading
 import tkinter as tk
-from tkinter import scrolledtext, messagebox, simpledialog, filedialog
-import hashlib
+from tkinter import scrolledtext, messagebox
 import os
 import sys
 import datetime
 import json
-import base64
 import time
 import logging
+import ipaddress
 
-PORT = 8888
+PORT = 9527
 BUFFER = 65536
-MAX_IMG_SIZE = 5 * 1024 * 1024  # 5MB
-
+MAX_IMG_SIZE = 5 * 1024 * 1024
 
 def get_base_dir():
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 
-STICKER_DIR = os.path.join(get_base_dir(), "stickers")
-HISTORY_FILE = os.path.join(get_base_dir(), "lan_chat_history.json")
-CONFIG_FILE = os.path.join(get_base_dir(), "lan_chat_config.json")
-IMG_DIR = os.path.join(get_base_dir(), "chat_images")
-
-QUICK_EMOJIS = ["😂","😅","😏","😎","😭","😡","🥴","🤔","👍","👎","❤️","🔥","💀","🎉","🚀","💪","🫡","🤣","😤","😈","🦞","🐶","🌚","💩"]
-
-# 日志
 LOG_FILE = os.path.join(get_base_dir(), "lan_chat.log")
-logging.basicConfig(
-    filename=LOG_FILE,
-    level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
-logging.info("=" * 40)
-logging.info("LAN Chat Pro 启动")
-logging.info(f"Python: {sys.version}")
-logging.info(f"系统: {sys.platform}")
+HISTORY_FILE = os.path.join(get_base_dir(), "lan_chat_history.json")
+IMG_DIR = os.path.join(get_base_dir(), "chat_images")
+CONFIG_FILE = os.path.join(get_base_dir(), "lan_chat_config.json")
+
+logging.basicConfig(filename=LOG_FILE, level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+logging.info("="*40)
+logging.info("LAN Chat 启动")
 
 
-def _recv_exact(sock, size, timeout=5):
-    """接收精确长度的数据（带超时）"""
+def recv_n(sock, n, timeout=3):
+    """接收精确 n 字节，超时返回 None"""
     sock.settimeout(timeout)
     buf = b""
     try:
-        while len(buf) < size:
-            chunk = sock.recv(size - len(buf))
-            if not chunk:
+        while len(buf) < n:
+            c = sock.recv(n - len(buf))
+            if not c:
                 return None
-            buf += chunk
-    except socket.timeout:
-        return None
+            buf += c
     except:
         return None
     finally:
@@ -69,16 +55,64 @@ def _recv_exact(sock, size, timeout=5):
     return buf
 
 
-class LanChatPro:
+def scan_subnet():
+    """扫描当前网段内开放 9527 端口的机器"""
+    results = []
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+    except:
+        return results
+
+    parts = ip.split(".")
+    base = f"{parts[0]}.{parts[1]}.{parts[2]}."
+    logging.info(f"开始扫描网段 {base}0/24")
+
+    def check(host):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.3)
+            s.connect((host, PORT))
+            s.close()
+            return host
+        except:
+            return None
+
+    threads = []
+    found = []
+    lock = threading.Lock()
+
+    def worker(host):
+        r = check(host)
+        if r:
+            with lock:
+                found.append(r)
+
+    for i in range(1, 255):
+        t = threading.Thread(target=worker, args=(f"{base}{i}",), daemon=True)
+        threads.append(t)
+        t.start()
+
+    for t in threads:
+        t.join(timeout=1)
+
+    logging.info(f"扫描完成，发现 {len(found)} 台机器")
+    return found
+
+
+# ====================================================================
+
+class LanChat:
     def __init__(self, root):
         self.root = root
-        self.root.title("LAN Chat Pro")
-        self.root.geometry("680x620")
+        self.root.title("LAN Chat")
+        self.root.geometry("700x620")
         self.root.minsize(620, 540)
 
-        self.server_sock = None
-        self.client_sock = None
-        self.clients = {}
+        self.sock = None
+        self.clients = {}      # {sock: name}
         self.running = False
         self.is_server = False
         self.nickname = os.getlogin()
@@ -87,143 +121,92 @@ class LanChatPro:
         self.img_counter = 0
         self._images = []
         self._last_img_path = None
+        self._scanned_ips = []
 
         os.makedirs(IMG_DIR, exist_ok=True)
-        os.makedirs(STICKER_DIR, exist_ok=True)
         self.load_history()
         self.load_config()
 
-        # ===== 顶部栏 =====
+        # ===== 顶栏 =====
         top = tk.Frame(root)
         top.pack(fill="x", padx=8, pady=4)
 
         tk.Label(top, text="昵称:").pack(side="left")
         self.name_entry = tk.Entry(top, width=10)
-        self.name_entry.pack(side="left", padx=(2, 4))
+        self.name_entry.pack(side="left", padx=(2, 6))
         self.name_entry.insert(0, self.nickname)
 
-        self.mode_var = tk.StringVar(value="server")
-        tk.Radiobutton(top, text="🏠 建群", variable=self.mode_var,
-                       value="server").pack(side="left")
-        tk.Radiobutton(top, text="🔗 加群", variable=self.mode_var,
-                       value="client").pack(side="left")
+        self.start_btn = tk.Button(top, text="🚀 启动",
+            command=self.toggle_connect, bg="#4CAF50", fg="white", font=("", 9, "bold"))
+        self.start_btn.pack(side="right", padx=2)
 
-        self.reconnect_btn = tk.Button(top, text="🔄 上次的群", font=("", 8),
-                                       command=self.quick_reconnect,
-                                       bd=1, relief=tk.RAISED)
-        self.reconnect_btn.pack(side="right", padx=2)
-        self.connect_btn = tk.Button(top, text="🚀 启动",
-                                     command=self.do_connect,
-                                     bg="#4CAF50", fg="white",
-                                     font=("", 9, "bold"))
-        self.connect_btn.pack(side="right", padx=2)
+        self.scan_btn = tk.Button(top, text="🔍 扫描局域网",
+            command=self.start_scan, font=("", 9))
+        self.scan_btn.pack(side="right", padx=2)
 
-        # ===== 信息栏 =====
+        # ===== 状态 + IP 列表 =====
         info = tk.Frame(root)
         info.pack(fill="x", padx=8)
-        self.ip_label = tk.Label(info, text="状态: 就绪",
-                                 fg="#888", anchor="w", font=("Consolas", 9))
-        self.ip_label.pack(side="left")
+
+        self.status_label = tk.Label(info, text="状态: 就绪", fg="#888",
+            anchor="w", font=("Consolas", 9))
+        self.status_label.pack(side="left")
+
         self.online_label = tk.Label(info, text="👥 0人", fg="#888")
         self.online_label.pack(side="right")
 
-        # ===== 可拖拽分割的主区域 =====
-        self.pw = tk.PanedWindow(root, orient=tk.VERTICAL, sashwidth=6,
-                                  sashrelief=tk.RAISED, bg="#333")
-        self.pw.pack(fill="both", padx=8, pady=(2, 2), expand=True)
+        # ===== IP 列表 =====
+        ip_frame = tk.Frame(root)
+        ip_frame.pack(fill="x", padx=8, pady=(2, 0))
 
-        # 上：聊天区
-        top_frame = tk.Frame(self.pw)
-        self.msg_area = scrolledtext.ScrolledText(
-            top_frame, state="disabled", height=18,
-            font=("Microsoft YaHei", 10), wrap=tk.WORD)
-        self.msg_area.pack(fill="both", expand=True)
+        tk.Label(ip_frame, text="局域网在线:", font=("", 9)).pack(side="left")
+        self.ip_listbox = tk.Listbox(ip_frame, height=3, font=("Consolas", 9))
+        self.ip_listbox.pack(fill="x", side="left", expand=True, padx=(4, 0))
+        self.ip_listbox.bind("<Double-Button-1>", self.on_ip_double_click)
+
+        ip_scroll = tk.Scrollbar(ip_frame, orient="vertical", command=self.ip_listbox.yview)
+        ip_scroll.pack(side="right", fill="y")
+        self.ip_listbox.configure(yscrollcommand=ip_scroll.set)
+
+        # ===== 聊天区 =====
+        self.msg_area = scrolledtext.ScrolledText(root, state="disabled",
+            height=16, font=("Microsoft YaHei", 10), wrap=tk.WORD)
+        self.msg_area.pack(fill="both", padx=8, pady=(2, 2), expand=True)
         self.msg_area.bind("<Control-v>", self.on_paste_img)
-        # 右键菜单
-        self.msg_area.bind("<Button-3>", self.on_msg_right_click)
-        self.msg_menu = tk.Menu(self.root, tearoff=0)
-        self.msg_menu.add_command(label="💾 存为表情包", command=self.save_last_img_as_sticker)
-        self.pw.add(top_frame, height=350)
-
-        # 下：输入区
-        bottom_frame = tk.Frame(self.pw)
-        self.msg_entry = tk.Text(bottom_frame, height=4,
-                                 font=("Microsoft YaHei", 10))
-        self.msg_entry.pack(fill="both", expand=True, pady=(0, 0))
-        self.msg_entry.bind("<Return>", self.on_enter)
-        self.msg_entry.bind("<Shift-Return>", lambda e: None)
-        self.pw.add(bottom_frame, height=120)
 
         # ===== 在线用户 =====
         self.user_var = tk.StringVar(value="")
         tk.Label(root, textvariable=self.user_var, fg="#888",
-                 anchor="w", font=("", 9)).pack(fill="x", padx=8)
+            anchor="w", font=("", 9)).pack(fill="x", padx=8)
 
-        # ===== 快捷表情（可滚动）+ 功能按钮 =====
+        # ===== 快捷表情 =====
+        emoji_list = ["😂","😅","😏","😎","😭","😡","🥴","🤔","👍","🔥","💀","🎉","🦞"]
         emo_frame = tk.Frame(root)
         emo_frame.pack(fill="x", padx=8, pady=(0, 2))
-
-        # 左：可水平滚动的表情栏
-        emo_scroll_frame = tk.Frame(emo_frame)
-        emo_scroll_frame.pack(side="left", fill="x", expand=True)
-
-        emo_canvas = tk.Canvas(emo_scroll_frame, height=32, bd=0,
-                               highlightthickness=0)
-        emo_scroll = tk.Scrollbar(emo_scroll_frame, orient="horizontal",
-                                  command=emo_canvas.xview)
-        emo_canvas.configure(xscrollcommand=emo_scroll.set)
-
-        emo_inner = tk.Frame(emo_canvas)
-        emo_inner.bind("<Configure>",
-                       lambda e: emo_canvas.configure(scrollregion=emo_canvas.bbox("all")))
-        emo_canvas.create_window((0, 0), window=emo_inner, anchor="nw")
-
-        emo_canvas.pack(side="top", fill="x")
-        emo_scroll.pack(side="bottom", fill="x")
-
-        for e in QUICK_EMOJIS:
-            btn = tk.Button(emo_inner, text=e, font=("", 13),
-                            width=2, bd=0,
-                            command=lambda em=e: self.insert_emoji(em))
+        for e in emoji_list:
+            btn = tk.Button(emo_frame, text=e, font=("", 13), width=2, bd=0,
+                command=lambda em=e: self.insert_emoji(em))
             btn.pack(side="left", padx=1)
+        tk.Button(emo_frame, text="🖼️ 发图", font=("", 11), bd=1, relief=tk.RAISED,
+            command=self.send_image_dialog).pack(side="left", padx=4)
+        self.send_btn = tk.Button(emo_frame, text="发送", command=self.send_msg,
+            state="disabled", font=("", 9, "bold"), bg="#2196F3", fg="white", padx=12)
+        self.send_btn.pack(side="right", padx=4)
 
-        # 绑定滚轮事件
-        def on_emo_scroll(event):
-            emo_canvas.xview_scroll(-1 if event.delta > 0 else 1, "units")
-        emo_canvas.bind("<Enter>", lambda e: emo_canvas.bind_all("<MouseWheel>", on_emo_scroll))
-        emo_canvas.bind("<Leave>", lambda e: emo_canvas.unbind_all("<MouseWheel>"))
-
-        # 右：功能按钮
-        btn_frame = tk.Frame(emo_frame)
-        btn_frame.pack(side="right", padx=(4, 0))
-        tk.Button(btn_frame, text="🖼️ 发图", font=("", 11),
-                  bd=1, relief=tk.RAISED, bg="#E8E8E8",
-                  command=self.send_image_dialog).pack(side="left", padx=1)
-        tk.Button(btn_frame, text="📦 表情包", font=("", 11),
-                  bd=1, relief=tk.RAISED, bg="#E8E8E8",
-                  command=self.open_sticker_picker).pack(side="left", padx=1)
-        self.send_btn = tk.Button(btn_frame, text="发送",
-                                  command=self.send_msg,
-                                  state="disabled",
-                                  font=("", 9, "bold"),
-                                  bg="#2196F3", fg="white", padx=12)
-        self.send_btn.pack(side="left", padx=2)
+        # ===== 输入框 =====
+        self.msg_entry = tk.Text(root, height=3, font=("Microsoft YaHei", 10))
+        self.msg_entry.pack(fill="x", padx=8, pady=(0, 4))
+        self.msg_entry.bind("<Return>", lambda e: self.send_msg() or "break")
+        self.msg_entry.bind("<Shift-Return>", lambda e: None)
 
         # ===== 状态栏 =====
-        self.status_bar = tk.Label(root,
-                                   text="💡 建群 = 创建房间 | 加群 = 输入对方IP",
-                                   fg="#666", anchor="w", font=("", 9))
+        self.status_bar = tk.Label(root, text="💡 启动后自动建群，扫描可发现同一网段的其他用户",
+            fg="#666", anchor="w", font=("", 9))
         self.status_bar.pack(fill="x", padx=8, pady=(0, 4))
 
-        self.log("⚡ LAN Chat Pro 已启动")
+        self.log("⚡ LAN Chat 已启动")
         if self.history:
-            self.msg_area.config(state="normal")
-            self.msg_area.insert(tk.END, f"── 历史记录（共{len(self.history)}条）──\n")
-            for h in self.history[-30:]:
-                self.msg_area.insert(tk.END, h["m"] + "\n")
-            self.msg_area.see(tk.END)
-            self.msg_area.config(state="disabled")
-            self.log(f"📂 加载了 {len(self.history)} 条历史记录", save=False)
+            self._show_history()
 
     # ==================== UI ====================
     def log(self, msg, save=True):
@@ -231,417 +214,337 @@ class LanChatPro:
         self.msg_area.insert(tk.END, msg + "\n")
         self.msg_area.see(tk.END)
         self.msg_area.config(state="disabled")
-        if save and not msg.startswith("⚡") and not msg.startswith("💡") \
-                and not msg.startswith("📂"):
+        if save:
             self.save_history(msg)
 
     def show_msg(self, sender, content):
-        ts = datetime.datetime.now().strftime("%m-%d %H:%M:%S")
-        self.log(f"[{ts}] {sender}: {content}")
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        line = f"[{ts}] {sender}: {content}"
+        self.log(line)
 
     def set_status(self, text, color="#666"):
-        self.status_bar.config(text=text, fg=color)
+        self.status_label.config(text=text, fg=color)
 
     def insert_emoji(self, em):
         self.msg_entry.insert(tk.END, em)
         self.msg_entry.focus()
 
-    def on_enter(self, event):
-        self.send_msg()
-        return "break"
-
     # ==================== 历史 ====================
     def load_history(self):
         if os.path.exists(HISTORY_FILE):
             try:
-                with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                with open(HISTORY_FILE, "r") as f:
                     self.history = json.load(f)
             except:
                 self.history = []
 
     def save_history(self, line):
-        self.history.append({
-            "t": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "m": line
-        })
+        self.history.append({"t": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "m": line})
         if len(self.history) > 500:
             self.history = self.history[-300:]
         try:
-            with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+            with open(HISTORY_FILE, "w") as f:
                 json.dump(self.history, f, ensure_ascii=False)
         except:
             pass
 
-    # ==================== 群组记忆 ====================
+    def _show_history(self):
+        self.msg_area.config(state="normal")
+        self.msg_area.insert(tk.END, f"── 历史记录（共{len(self.history)}条）──\n")
+        for h in self.history[-30:]:
+            self.msg_area.insert(tk.END, h["m"] + "\n")
+        self.msg_area.see(tk.END)
+        self.msg_area.config(state="disabled")
+        self.log(f"📂 加载了 {len(self.history)} 条历史记录", save=False)
+
+    # ==================== 配置记忆 ====================
     def load_config(self):
-        """加载上次的群组配置"""
         if os.path.exists(CONFIG_FILE):
             try:
                 with open(CONFIG_FILE, "r") as f:
-                    cfg = json.load(f)
+                    c = json.load(f)
                 self.name_entry.delete(0, tk.END)
-                self.name_entry.insert(0, cfg.get("nickname", self.nickname))
-                if cfg.get("mode") == "client" and cfg.get("ip"):
-                    self.mode_var.set("client")
-                    self._saved_ip = cfg["ip"]
-                    self._saved_pwd = cfg.get("pwd", "")
-                elif cfg.get("mode") == "server" and cfg.get("pwd"):
-                    self.mode_var.set("server")
-                    self._saved_pwd = cfg.get("pwd", "")
-                else:
-                    self._saved_ip = ""
-                    self._saved_pwd = ""
+                self.name_entry.insert(0, c.get("nickname", self.nickname))
             except:
-                self._saved_ip = ""
-                self._saved_pwd = ""
-        else:
-            self._saved_ip = ""
-            self._saved_pwd = ""
+                pass
 
-    def save_config(self, mode, ip="", pwd=""):
-        """保存群组配置"""
-        cfg = {
-            "nickname": self.name_entry.get().strip() or self.nickname,
-            "mode": mode,
-            "ip": ip,
-            "pwd": pwd
-        }
-        self._saved_ip = ip
-        self._saved_pwd = pwd
+    def save_config(self):
         try:
             with open(CONFIG_FILE, "w") as f:
-                json.dump(cfg, f)
+                json.dump({"nickname": self.name_entry.get().strip() or self.nickname}, f)
         except:
             pass
 
-    def quick_reconnect(self):
-        """一键重连到上次的群组"""
-        if not hasattr(self, '_saved_pwd') or not self._saved_pwd:
-            self.log("💡 没有可用的历史群组，请手动创建或加入")
-            return
-        self.nickname = self.name_entry.get().strip()
-        if not self.nickname:
-            messagebox.showerror("错误", "请输入昵称")
-            return
-        self.name_entry.config(state="readonly")
-        self.connect_btn.config(state="disabled")
+    # ==================== 扫描 ====================
+    def start_scan(self):
+        self.scan_btn.config(state="disabled", text="⏳ 扫描中...")
+        threading.Thread(target=self._do_scan, daemon=True).start()
 
-        if self.mode_var.get() == "server":
-            threading.Thread(target=self._start_server,
-                             args=(self._saved_pwd,), daemon=True).start()
+    def _do_scan(self):
+        logging.info("开始扫描局域网...")
+        ips = scan_subnet()
+        self._scanned_ips = ips
+        self.root.after(0, self._update_ip_list)
+        self.root.after(0, lambda: self.scan_btn.config(state="normal", text="🔍 扫描局域网"))
+        if ips:
+            self.root.after(0, lambda: self.log(f"🔍 发现 {len(ips)} 台机器运行了 LAN Chat"))
         else:
-            ip = getattr(self, '_saved_ip', '')
-            if not ip:
-                self.log("❌ 没有保存的 IP 地址")
-                self.name_entry.config(state="normal")
-                self.connect_btn.config(state="normal")
-                return
-            threading.Thread(target=self._start_client,
-                             args=(ip, self._saved_pwd), daemon=True).start()
+            self.root.after(0, lambda: self.log("🔍 未发现其他 LAN Chat 用户"))
 
-    # ==================== 连接 ====================
-    def do_connect(self):
+    def _update_ip_list(self):
+        self.ip_listbox.delete(0, tk.END)
+        for ip in self._scanned_ips:
+            self.ip_listbox.insert(tk.END, ip)
+
+    def on_ip_double_click(self, event):
+        sel = self.ip_listbox.curselection()
+        if not sel:
+            return
+        ip = self.ip_listbox.get(sel[0])
+        if self.running:
+            self.log("⚠️ 请先断开当前连接")
+            return
+        self.nickname = self.name_entry.get().strip() or self.nickname
+        self.name_entry.config(state="readonly")
+        self.start_btn.config(state="disabled")
+        threading.Thread(target=self._start_client, args=(ip,), daemon=True).start()
+
+    # ==================== 连接/断开 ====================
+    def toggle_connect(self):
         if self.running:
             self._disconnect()
             return
-        self.nickname = self.name_entry.get().strip()
-        logging.info(f"用户点击连接 - 昵称:{self.nickname} 模式:{self.mode_var.get()}")
-        if not self.nickname:
-            messagebox.showerror("错误", "请输入昵称")
-            return
-
-        if self.mode_var.get() == "server":
-            pwd = simpledialog.askstring("设置口令",
-                                         "设置群口令（至少4位）：",
-                                         parent=self.root)
-            if not pwd or len(pwd) < 4:
-                if pwd:
-                    messagebox.showerror("错误", "口令至少4位")
-                return
-            self.name_entry.config(state="readonly")
-            self.connect_btn.config(state="disabled")
-            self.save_config("server", pwd=pwd)
-            threading.Thread(target=self._start_server,
-                             args=(pwd,), daemon=True).start()
-        else:
-            ip = simpledialog.askstring("加群", "输入服务端的 IP 地址：",
-                                       parent=self.root)
-            if not ip:
-                return
-            pwd = simpledialog.askstring("口令", "输入群口令：",
-                                        parent=self.root)
-            if not pwd:
-                return
-            self.name_entry.config(state="readonly")
-            self.connect_btn.config(state="disabled")
-            self.save_config("client", ip=ip, pwd=pwd)
-            threading.Thread(target=self._start_client,
-                             args=(ip.strip(), pwd), daemon=True).start()
+        self.nickname = self.name_entry.get().strip() or self.nickname
+        logging.info(f"启动服务 昵称:{self.nickname}")
+        self.save_config()
+        self.name_entry.config(state="readonly")
+        self.start_btn.config(state="disabled")
+        threading.Thread(target=self._start_server, daemon=True).start()
 
     # ==================== 服务端 ====================
-    def _start_server(self, pwd):
-        logging.info("服务端启动中...")
-        pwd_hash = hashlib.sha256(pwd.encode()).hexdigest()
-        local_ip = self.get_local_ip()
+    def _start_server(self):
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind(("0.0.0.0", PORT))
-            sock.listen(5)
+            sock.listen(10)
             sock.settimeout(1)
-
-            self.server_sock = sock
+            self.sock = sock
             self.running = True
             self.is_server = True
 
             with self.lock:
                 self.clients[sock] = self.nickname
 
-            self.root.after(0, lambda: self.ip_label.config(
-                text=f"IP: {local_ip}  口令: {pwd}", fg="green"))
-            self.root.after(0, lambda: self.connect_btn.config(
+            local_ip = self.get_local_ip()
+            self.root.after(0, lambda: self.status_label.config(
+                text=f"🟢 已启动端口 {PORT}  IP:{local_ip}", fg="green"))
+            self.root.after(0, lambda: self.start_btn.config(
                 text="⏹ 关闭", bg="#f44336", state="normal"))
             self.root.after(0, lambda: self.send_btn.config(state="normal"))
-            self.root.after(0, lambda: self.set_status(
-                f"🟢 群已创建 · 口令: {pwd}"))
-            self.root.after(0, lambda: self.log(
-                f"🟢 群已创建，IP: {local_ip}  口令: {pwd}"))
-            self.root.after(0, self.update_user_list)
-            logging.info(f"服务端启动成功 IP:{local_ip}")
+            self.root.after(0, lambda: self.set_status(f"🟢 服务已启动 · 端口 {PORT}"))
+            self.root.after(0, lambda: self.log(f"🟢 服务已启动，IP: {local_ip}  端口: {PORT}"))
+            self.root.after(0, self._update_user_list)
+            self.root.after(0, lambda: self.scan_btn.config(text="🔍 刷新"))
+
+            logging.info(f"服务端启动成功 {local_ip}:{PORT}")
 
             while self.running:
                 try:
                     client, addr = sock.accept()
                     threading.Thread(target=self._handle_client,
-                                     args=(client, addr, pwd_hash),
-                                     daemon=True).start()
+                        args=(client, addr), daemon=True).start()
                 except socket.timeout:
                     continue
                 except:
                     break
+
         except Exception as e:
-            self.root.after(0, lambda: messagebox.showerror(
-                "服务端错误",
-                f"启动失败: {e}"))
-            self.root.after(0, lambda: self.log(f"❌ 服务端错误: {e}"))
+            logging.error(f"服务端错误: {e}")
+            self.root.after(0, lambda: messagebox.showerror("错误", f"启动失败: {e}"))
             self._disconnect()
 
-    def _handle_client(self, client, addr, pwd_hash):
-        logging.info(f"新客户端连接 {addr[0]}:{addr[1]}")
-        client.settimeout(10)
+    def _handle_client(self, client, addr):
+        client.settimeout(5)
         try:
-            data = client.recv(BUFFER).decode()
-            parts = data.split(":", 2)
-            if len(parts) < 3 or parts[0] != "AUTH":
+            # 接收昵称
+            data = recv_n(client, 4)
+            if data is None or data.decode() != "NICK":
                 client.close()
                 return
-            _, client_hash, client_name = parts
-            if client_hash != pwd_hash:
-                client.sendall(b"AUTH_FAIL")
-                client.close()
-                return
-            client.sendall(b"AUTH_OK")
+            name_len = int(recv_n(client, 4).decode().strip())
+            name = recv_n(client, name_len).decode()
+            client.sendall(b"OK")
 
             with self.lock:
-                self.clients[client] = client_name
-            self.root.after(0, lambda: self.log(
-                f"🔗 {client_name} ({addr[0]}) 加入了群聊"))
-            self.root.after(0, self.update_user_list)
-            self._broadcast(f"💬 {client_name} 加入了群聊", exclude=client)
+                self.clients[client] = name
+            logging.info(f"客户端加入: {name} ({addr[0]})")
+            self.root.after(0, lambda: self.log(f"🔗 {name} ({addr[0]}) 加入了群聊"))
+            self.root.after(0, self._update_user_list)
+            self._broadcast(f"💬 {name} 加入了群聊", exclude=client)
 
+            # 消息循环
             while self.running:
-                try:
-                    hdr = _recv_exact(client, 4)
-                    if hdr is None:
-                        break
-                    ptype = hdr.decode()
-                    if ptype == "MSG:":
-                        meta = _recv_exact(client, 8)
-                        if meta is None:
-                            break
-                        body_len = int(meta.decode().strip())
-                        body = _recv_exact(client, body_len)
-                        if body is None:
-                            break
-                        content = body.decode()
-                        ts = datetime.datetime.now().strftime("%m-%d %H:%M:%S")
-                        self.root.after(0, lambda c=content,
-                                        n=client_name, t=ts:
-                                        self.log(f"[{t}] {n}: {c}"))
-                        self._broadcast_raw(
-                            f"MSG:{client_name}:{content}", exclude=client)
-
-                    elif ptype == "IMG:":
-                        name_len = int(_recv_exact(client, 8).decode().strip())
-                        sender_name = _recv_exact(client, name_len).decode()
-                        data_len = int(_recv_exact(client, 8).decode().strip())
-                        remain = data_len
-                        chunks = []
-                        while remain > 0:
-                            chunk = _recv_exact(client, min(BUFFER, remain))
-                            if chunk is None:
-                                break
-                            chunks.append(chunk)
-                            remain -= len(chunk)
-                        img_data = b"".join(chunks)
-                        self._handle_image_data(sender_name, img_data)
-                        # 转发给其他人（包含发送者信息）
-                        self._broadcast_raw(
-                            b"IMG:" + f"{len(sender_name):<8}".encode()
-                            + sender_name.encode()
-                            + f"{data_len:<8}".encode()
-                            + img_data, exclude=client)
-                except:
+                hdr = recv_n(client, 4)
+                if hdr is None:
                     break
+                t = hdr.decode()
+                if t == "MSG:":
+                    sz = int(recv_n(client, 8).decode().strip())
+                    body = recv_n(client, sz)
+                    if body is None:
+                        break
+                    text = body.decode()
+                    ts = datetime.datetime.now().strftime("%H:%M:%S")
+                    self.root.after(0, lambda n=name, c=text: self.show_msg(n, c))
+                    self._broadcast_raw(f"MSG:{name}:{text}", exclude=client)
+
+                elif t == "IMG:":
+                    sz = int(recv_n(client, 8).decode().strip())
+                    remain = sz
+                    chunks = []
+                    while remain > 0:
+                        ck = recv_n(client, min(BUFFER, remain))
+                        if ck is None:
+                            break
+                        chunks.append(ck)
+                        remain -= len(ck)
+                    img = b"".join(chunks)
+                    self._handle_image_data(name, img)
+                    self._broadcast_raw(
+                        f"IMG:{name}:{sz}:".encode() + img, exclude=client)
+                else:
+                    break
+
         except:
             pass
+
         finally:
             with self.lock:
                 if client in self.clients:
-                    name = self.clients.pop(client)
-                    self.root.after(0, lambda n=name: self.log(
-                        f"🔌 {n} 离开了群聊"))
-                    self.root.after(0, self.update_user_list)
-                    self._broadcast(f"💬 {name} 离开了群聊")
+                    nm = self.clients.pop(client)
+                    logging.info(f"客户端离开: {nm}")
+                    self.root.after(0, lambda n=nm: self.log(f"🔌 {n} 离开了群聊"))
+                    self.root.after(0, self._update_user_list)
+                    self._broadcast(f"💬 {nm} 离开了群聊")
             try:
                 client.close()
             except:
                 pass
 
     # ==================== 客户端 ====================
-    def _start_client(self, ip, pwd):
-        logging.info(f"客户端启动 目标IP:{ip}")
-        pwd_hash = hashlib.sha256(pwd.encode()).hexdigest()
+    def _start_client(self, ip):
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(5)
             sock.connect((ip, PORT))
             sock.settimeout(None)
-
-            self.client_sock = sock
+            self.sock = sock
             self.running = True
+            self.is_server = False
 
-            self.root.after(0, lambda: self.ip_label.config(
-                text=f"IP: {ip}", fg="green"))
-            self.root.after(0, lambda: self.connect_btn.config(
+            self.root.after(0, lambda: self.status_label.config(text=f"🟢 已连接 {ip}", fg="green"))
+            self.root.after(0, lambda: self.start_btn.config(
                 text="⏹ 断开", bg="#f44336", state="normal"))
             self.root.after(0, lambda: self.send_btn.config(state="normal"))
-            self.root.after(0, lambda: self.set_status(f"🟢 已连接 {ip}"))
-            self.root.after(0, lambda: self.log(
-                f"🔗 正在连接 {ip}:{PORT} ..."))
+            self.root.after(0, lambda: self.set_status(f"🟢 已连接 {ip}:{PORT}"))
+            self.root.after(0, lambda: self.log(f"🔗 正在连接 {ip}:{PORT}..."))
 
-            sock.sendall(f"AUTH:{pwd_hash}:{self.nickname}".encode())
-            resp = sock.recv(BUFFER).decode()
-            if resp == "AUTH_FAIL":
-                self.root.after(0, lambda: messagebox.showerror(
-                    "错误", "❌ 口令错误"))
-                self._disconnect()
-                return
-            self.root.after(0, lambda: self.log("✅ 口令验证通过"))
+            # 发送昵称
+            name_b = self.nickname.encode()
+            sock.sendall(b"NICK" + f"{len(name_b):<4}".encode() + name_b)
+            if recv_n(sock, 2) is None:
+                raise Exception("服务端未确认")
+            self.root.after(0, lambda: self.log("✅ 已加入群聊"))
 
             while self.running:
-                try:
-                    hdr = _recv_exact(sock, 4)
-                    if hdr is None:
-                        break
-                    ptype = hdr.decode()
-                    if ptype == "MSG:":
-                        meta = _recv_exact(sock, 8)
-                        if meta is None:
-                            break
-                        body_len = int(meta.decode().strip())
-                        body = _recv_exact(sock, body_len)
-                        if body is None:
-                            break
-                        content = body.decode()
-                        if ":" in content:
-                            s, m = content.split(":", 1)
-                            self.root.after(
-                                0, lambda s=s.strip(), m=m.strip():
-                                self.show_msg(s, m))
-                        else:
-                            self.root.after(
-                                0, lambda c=content: self.log(f"💬 {c}"))
-                    elif ptype == "IMG:":
-                        name_len = int(_recv_exact(sock, 8).decode().strip())
-                        sender_name = _recv_exact(sock, name_len).decode()
-                        data_len = int(_recv_exact(sock, 8).decode().strip())
-                        remain = data_len
-                        chunks = []
-                        while remain > 0:
-                            chunk = _recv_exact(
-                                sock, min(BUFFER, remain))
-                            if chunk is None:
-                                break
-                            chunks.append(chunk)
-                            remain -= len(chunk)
-                        img_data = b"".join(chunks)
-                        self._handle_image_data(sender_name, img_data)
-                except:
+                hdr = recv_n(sock, 4)
+                if hdr is None:
                     break
+                t = hdr.decode()
+                if t == "MSG:":
+                    sz = int(recv_n(sock, 8).decode().strip())
+                    body = recv_n(sock, sz)
+                    if body is None:
+                        break
+                    text = body.decode()
+                    if ":" in text:
+                        s, m = text.split(":", 1)
+                        self.root.after(0, lambda s=s.strip(), m=m.strip(): self.show_msg(s, m))
+                    else:
+                        self.root.after(0, lambda c=text: self.log(f"💬 {c}"))
+                elif t == "IMG:":
+                    sz = int(recv_n(sock, 8).decode().strip())
+                    remain = sz
+                    chunks = []
+                    while remain > 0:
+                        ck = recv_n(sock, min(BUFFER, remain))
+                        if ck is None:
+                            break
+                        chunks.append(ck)
+                        remain -= len(ck)
+                    img = b"".join(chunks)
+                    self._handle_image_data("未知", img)
 
         except socket.timeout:
-            self.root.after(
-                0, lambda: messagebox.showerror("错误", "连接超时"))
+            self.root.after(0, lambda: messagebox.showerror("错误", "连接超时"))
         except ConnectionRefusedError:
-            self.root.after(
-                0, lambda: messagebox.showerror("错误", "连接被拒绝"))
+            self.root.after(0, lambda: messagebox.showerror("错误", "连接被拒绝"))
         except Exception as e:
-            self.root.after(
-                0, lambda: self.log(f"❌ 连接失败: {e}"))
+            logging.error(f"客户端连接失败: {e}")
+            self.root.after(0, lambda: self.log(f"❌ 连接失败: {e}"))
+
         self.root.after(0, lambda: self.log("🔌 已断开"))
         self._disconnect()
 
     # ==================== 广播 ====================
     def _broadcast(self, msg, exclude=None):
-        raw = f"MSG:{self.nickname}:{msg}"
+        raw = f"{self.nickname}:{msg}"
         with self.lock:
-            for sock in list(self.clients.keys()):
-                if sock == exclude or sock == self.server_sock:
+            for s in list(self.clients.keys()):
+                if s == exclude or s == self.sock:
                     continue
                 try:
                     body = raw.encode()
-                    sock.sendall(b"MSG:" + f"{len(body):<8}".encode() + body)
+                    s.sendall(b"MSG:" + f"{len(body):<8}".encode() + body)
                 except:
                     pass
 
     def _broadcast_raw(self, raw_binary, exclude=None):
         with self.lock:
-            for sock in list(self.clients.keys()):
-                if sock == exclude or sock == self.server_sock:
+            for s in list(self.clients.keys()):
+                if s == exclude or s == self.sock:
                     continue
                 try:
                     if isinstance(raw_binary, str):
                         raw_binary = raw_binary.encode()
-                    sock.sendall(raw_binary)
+                    s.sendall(raw_binary)
                 except:
                     pass
 
-    def update_user_list(self):
+    def _update_user_list(self):
         names = [self.nickname]
         with self.lock:
-            for _, name in self.clients.items():
-                if name not in names:
-                    names.append(name)
+            for _, n in self.clients.items():
+                if n not in names:
+                    names.append(n)
         self.user_var.set(f"👥 在线: {' · '.join(names)}")
         self.online_label.config(text=f"👥 {len(names)}人")
 
-    # ==================== 发送消息 ====================
+    # ==================== 发送 ====================
     def send_msg(self):
         text = self.msg_entry.get("1.0", tk.END).strip()
         if not text or not self.running:
             return
         self.msg_entry.delete("1.0", tk.END)
         self.show_msg(self.nickname, text)
-        self.save_history(f"{self.nickname}: {text}")
 
         if self.is_server:
             self._broadcast(text)
         else:
             try:
                 body = f"{self.nickname}:{text}".encode()
-                self.client_sock.sendall(
-                    b"MSG:" + f"{len(body):<8}".encode() + body)
+                self.sock.sendall(b"MSG:" + f"{len(body):<8}".encode() + body)
             except:
                 self.log("❌ 发送失败")
                 self._disconnect()
@@ -651,17 +554,13 @@ class LanChatPro:
         if not self.running:
             messagebox.showwarning("提示", "请先加入群聊")
             return
-        path = filedialog.askopenfilename(
-            title="选择图片",
-            filetypes=[
-                ("图片", "*.png *.jpg *.jpeg *.gif *.bmp"),
-                ("所有文件", "*.*")
-            ])
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(title="选择图片",
+            filetypes=[("图片", "*.png *.jpg *.jpeg *.gif *.bmp"), ("所有", "*.*")])
         if not path:
             return
-        size = os.path.getsize(path)
-        if size > MAX_IMG_SIZE:
-            messagebox.showerror("错误", f"图片太大（{size//1024}KB），最大支持5MB")
+        if os.path.getsize(path) > MAX_IMG_SIZE:
+            messagebox.showerror("错误", f"图片太大，最大5MB")
             return
         self._send_image_file(path)
 
@@ -689,19 +588,16 @@ class LanChatPro:
                 f.write(img_bytes)
             self._process_and_show_image(self.nickname, fpath)
 
-            payload = b"IMG:" + f"{len(self.nickname):<8}".encode() \
-                      + self.nickname.encode() + f"{len(img_bytes):<8}".encode() + img_bytes
+            payload = b"IMG:" + f"{len(img_bytes):<8}".encode() + img_bytes
             if self.is_server:
-                self._broadcast_raw(payload, exclude=None)
+                self._broadcast_raw(payload)
             else:
-                self.client_sock.sendall(payload)
+                self.sock.sendall(payload)
         except Exception as e:
             self.log(f"❌ 图片发送失败: {e}")
 
     def _handle_image_data(self, sender, img_bytes):
         if len(img_bytes) > MAX_IMG_SIZE:
-            self.root.after(0, lambda: self.log(
-                f"❌ 收到超大图片 ({len(img_bytes)//1024}KB)，已跳过"))
             return
         try:
             self.img_counter += 1
@@ -709,39 +605,32 @@ class LanChatPro:
             fpath = os.path.join(IMG_DIR, fname)
             with open(fpath, "wb") as f:
                 f.write(img_bytes)
-            # 在后台线程缩放，避免卡 UI
             threading.Thread(target=self._process_and_show_image,
-                             args=(sender, fpath), daemon=True).start()
-        except Exception as e:
-            self.root.after(0, lambda: self.log(f"❌ 图片接收失败: {e}"))
+                args=(sender, fpath), daemon=True).start()
+        except:
+            pass
 
     def _process_and_show_image(self, sender, fpath):
-        """后台缩放图片，再切回主线程显示"""
         try:
             from PIL import Image, ImageTk
             img = Image.open(fpath)
-            max_w, max_h = 200, 300
             w, h = img.size
-            if w > max_w or h > max_h:
-                ratio = min(max_w / w, max_h / h)
-                w, h = int(w * ratio), int(h * ratio)
-                img = img.resize((w, h), Image.LANCZOS)
+            if w > 200:
+                h = int(h * 200 / w)
+                w = 200
+            img = img.resize((w, h), Image.LANCZOS)
             photo = ImageTk.PhotoImage(img)
             self.root.after(0, lambda: self._display_image(sender, fpath, photo))
         except ImportError:
             self.root.after(0, lambda: self.log(
-                f"[{datetime.datetime.now().strftime('%m-%d %H:%M:%S')}] {sender}: "
-                f"[图片] {os.path.basename(fpath)}"))
-            self.root.after(0, lambda: self.log(
-                "   (需安装 Pillow: pip install Pillow)"))
+                f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {sender}: [图片]"))
         except Exception as e:
             self.root.after(0, lambda: self.log(f"❌ 图片处理失败: {e}"))
 
     def _display_image(self, sender, fpath, photo):
-        """主线程中显示图片"""
-        ts = datetime.datetime.now().strftime("%m-%d %H:%M:%S")
-        self.log(f"[{ts}] {sender}: [图片] {os.path.basename(fpath)}", save=False)
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
         self.msg_area.config(state="normal")
+        self.msg_area.insert(tk.END, f"[{ts}] {sender}: [图片]\n")
         self.msg_area.image_create(tk.END, image=photo)
         self.msg_area.insert(tk.END, "\n")
         self.msg_area.see(tk.END)
@@ -749,104 +638,28 @@ class LanChatPro:
         self._images.append(photo)
         self._last_img_path = fpath
 
-    # ==================== 表情包 ====================
-    def on_msg_right_click(self, event):
-        """右键菜单"""
-        if self._last_img_path and os.path.exists(self._last_img_path):
-            self.msg_menu.tk_popup(event.x_root, event.y_root)
-
-    def save_last_img_as_sticker(self):
-        """把最后一张收到的图片存为表情包"""
-        if not self._last_img_path or not os.path.exists(self._last_img_path):
-            self.log("❌ 没有可保存的图片")
-            return
-        fname = f"sticker_{int(time.time())}.png"
-        dst = os.path.join(STICKER_DIR, fname)
-        try:
-            from PIL import Image
-            img = Image.open(self._last_img_path)
-            img.save(dst)
-            self.log(f"✅ 已保存表情包: {fname}")
-        except Exception as e:
-            self.log(f"❌ 保存失败: {e}")
-
-    def open_sticker_picker(self):
-        """打开表情包选择窗口"""
-        files = sorted(os.listdir(STICKER_DIR), reverse=True)
-        if not files:
-            self.log("💡 还没表情包，在图片上右键→「存为表情包」添加")
-            return
-
-        win = tk.Toplevel(self.root)
-        win.title("表情包")
-        win.geometry("520x400")
-
-        canvas = tk.Canvas(win, bg="#f0f0f0")
-        scroll = tk.Scrollbar(win, orient="vertical", command=canvas.yview)
-        frame = tk.Frame(canvas, bg="#f0f0f0")
-
-        frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=frame, anchor="nw")
-        canvas.configure(yscrollcommand=scroll.set)
-
-        canvas.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
-
-        row = 0
-        col = 0
-        for fname in files:
-            fpath = os.path.join(STICKER_DIR, fname)
-            try:
-                from PIL import Image, ImageTk
-                img = Image.open(fpath)
-                img.thumbnail((80, 80), Image.LANCZOS)
-                photo = ImageTk.PhotoImage(img)
-                btn = tk.Button(frame, image=photo, bd=1, relief=tk.RAISED,
-                                command=lambda p=fpath: self.send_sticker(p))
-                btn.image = photo
-                btn.grid(row=row, column=col, padx=4, pady=4)
-                col += 1
-                if col > 4:
-                    col = 0
-                    row += 1
-            except:
-                continue
-
-    def send_sticker(self, fpath):
-        """发送选中的表情包"""
-        if not self.running:
-            return
-        self._send_image_file(fpath)
-
     # ==================== 断开 ====================
     def _disconnect(self):
         logging.info("断开连接")
         self.running = False
         self.is_server = False
         with self.lock:
-            for sock in list(self.clients.keys()):
+            for s in list(self.clients.keys()):
                 try:
-                    sock.close()
+                    s.close()
                 except:
                     pass
             self.clients.clear()
-        try:
-            if self.server_sock:
-                self.server_sock.close()
-        except:
-            pass
-        try:
-            if self.client_sock:
-                self.client_sock.close()
-        except:
-            pass
-        self.server_sock = None
-        self.client_sock = None
-        self.root.after(0, lambda: self.connect_btn.config(
+        if self.sock:
+            try:
+                self.sock.close()
+            except:
+                pass
+        self.sock = None
+        self.root.after(0, lambda: self.start_btn.config(
             text="🚀 启动", bg="#4CAF50", state="normal"))
         self.root.after(0, lambda: self.send_btn.config(state="disabled"))
-        self.root.after(0, lambda: self.ip_label.config(
-            text="状态: 就绪", fg="#888"))
+        self.root.after(0, lambda: self.status_label.config(text="状态: 就绪", fg="#888"))
         self.root.after(0, lambda: self.user_var.set(""))
         self.root.after(0, lambda: self.online_label.config(text="👥 0人"))
         self.root.after(0, lambda: self.set_status("⏹ 已断开"))
@@ -869,5 +682,5 @@ class LanChatPro:
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app = LanChatPro(root)
+    app = LanChat(root)
     root.mainloop()
