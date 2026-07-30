@@ -306,6 +306,8 @@ class LanChatPro:
             "ip": ip,
             "pwd": pwd
         }
+        self._saved_ip = ip
+        self._saved_pwd = pwd
         try:
             with open(CONFIG_FILE, "w") as f:
                 json.dump(cfg, f)
