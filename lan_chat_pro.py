@@ -197,7 +197,13 @@ class LanChatPro:
 
         self.log("⚡ LAN Chat Pro 已启动")
         if self.history:
-            self.log(f"📂 加载了 {len(self.history)} 条历史记录")
+            self.msg_area.config(state="normal")
+            self.msg_area.insert(tk.END, f"── 历史记录（共{len(self.history)}条）──\n")
+            for h in self.history[-30:]:
+                self.msg_area.insert(tk.END, h["m"] + "\n")
+            self.msg_area.see(tk.END)
+            self.msg_area.config(state="disabled")
+            self.log(f"📂 加载了 {len(self.history)} 条历史记录", save=False)
 
     # ==================== UI ====================
     def log(self, msg, save=True):
