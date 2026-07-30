@@ -568,37 +568,54 @@ class LanChatPro:
             self.log(f"❌ 图片发送失败: {e}")
 
     def _handle_image_data(self, sender, img_bytes):
+        if len(img_bytes) > MAX_IMG_SIZE:
+            self.root.after(0, lambda: self.log(
+                f"❌ 收到超大图片 ({len(img_bytes)//1024}KB)，已跳过"))
+            return
         try:
             self.img_counter += 1
             fname = f"img_{int(time.time())}_{self.img_counter}.png"
             fpath = os.path.join(IMG_DIR, fname)
             with open(fpath, "wb") as f:
                 f.write(img_bytes)
-            self.root.after(0, lambda: self._show_image(sender, fpath))
+            # 在后台线程缩放，避免卡 UI
+            threading.Thread(target=self._process_and_show_image,
+                             args=(sender, fpath), daemon=True).start()
         except Exception as e:
             self.root.after(0, lambda: self.log(f"❌ 图片接收失败: {e}"))
 
-    def _show_image(self, sender, fpath):
-        ts = datetime.datetime.now().strftime("%m-%d %H:%M:%S")
-        self.log(f"[{ts}] {sender}: [图片] {os.path.basename(fpath)}")
+    def _process_and_show_image(self, sender, fpath):
+        """后台缩放图片，再切回主线程显示"""
         try:
             from PIL import Image, ImageTk
             img = Image.open(fpath)
-            max_w = 200
+            max_w, max_h = 200, 300
             w, h = img.size
-            if w > max_w:
-                h = int(h * max_w / w)
-                w = max_w
-            img = img.resize((w, h), Image.LANCZOS)
+            if w > max_w or h > max_h:
+                ratio = min(max_w / w, max_h / h)
+                w, h = int(w * ratio), int(h * ratio)
+                img = img.resize((w, h), Image.LANCZOS)
             photo = ImageTk.PhotoImage(img)
-            self.msg_area.config(state="normal")
-            self.msg_area.image_create(tk.END, image=photo)
-            self.msg_area.insert(tk.END, "\n")
-            self.msg_area.see(tk.END)
-            self.msg_area.config(state="disabled")
-            self._images.append(photo)
+            self.root.after(0, lambda: self._display_image(sender, fpath, photo))
         except ImportError:
-            self.log("   (显示图片需安装: pip install Pillow)")
+            self.root.after(0, lambda: self.log(
+                f"[{datetime.datetime.now().strftime('%m-%d %H:%M:%S')}] {sender}: "
+                f"[图片] {os.path.basename(fpath)}"))
+            self.root.after(0, lambda: self.log(
+                "   (需安装 Pillow: pip install Pillow)"))
+        except Exception as e:
+            self.root.after(0, lambda: self.log(f"❌ 图片处理失败: {e}"))
+
+    def _display_image(self, sender, fpath, photo):
+        """主线程中显示图片"""
+        ts = datetime.datetime.now().strftime("%m-%d %H:%M:%S")
+        self.log(f"[{ts}] {sender}: [图片] {os.path.basename(fpath)}", save=False)
+        self.msg_area.config(state="normal")
+        self.msg_area.image_create(tk.END, image=photo)
+        self.msg_area.insert(tk.END, "\n")
+        self.msg_area.see(tk.END)
+        self.msg_area.config(state="disabled")
+        self._images.append(photo)
         self._last_img_path = fpath
 
     # ==================== 表情包 ====================
