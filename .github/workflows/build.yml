@@ -20,17 +20,16 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install UPX (压缩工具)
-        run: choco install upx -y --no-progress
-
       - name: Install dependencies
         run: |
           pip install pyinstaller pillow
 
-      - name: Build EXE (UPX 压缩)
+      - name: Build EXE
         shell: cmd
         run: |
-          pyinstaller LAN_Chat.spec
+          pyinstaller --onefile --windowed --name "LAN_Chat" ^
+            --hidden-import PIL --hidden-import PIL.ImageTk ^
+            --hidden-import PIL.ImageGrab lan_chat_pro.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
