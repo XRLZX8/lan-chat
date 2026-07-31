@@ -2,6 +2,5 @@ __pycache__/
 *.pyc
 dist/
 build/
-*.spec
 chat_images/
 lan_chat_history.json
