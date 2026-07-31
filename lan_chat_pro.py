@@ -184,13 +184,20 @@ class LanChat:
 
     def _upd_users(self):
         my_ip = get_local_ip()
-        lines = [f"👥 在线 {len(self.peers)+1} 人"]
+        n = len(self.peers) + 1
+        lines = [f"👥 在线 {n} 人"]
         lines.append(f"  📍 {self.my_name} (我) {my_ip}")
         with self.lock:
             for p in self.peers.values():
                 lines.append(f"  👤 {p['name']} ({p['ip']})")
         self.ulb.config(text="\n".join(lines))
-        self.online_lb.config(text=f"👥 {len(self.peers)+1}人")
+        self.online_lb.config(text=f"👥 {n}人")
+        # 底部状态栏实时描述
+        if self.running:
+            if n <= 1:
+                self.sb.config(text="🟢 仅你一人，等待其他人启动聊天...")
+            else:
+                self.sb.config(text=f"🟢 在线 {n} 人，可畅聊")
 
     # ==================== 主开关 ====================
     def toggle(self):
@@ -395,7 +402,8 @@ class LanChat:
             name = f"sent_{int(time.time())}{ext}"
             fpath = os.path.join(BASE(), "chat_images", name)
             with open(fpath, "wb") as f: f.write(data)
-            self._show_img(self.my_name, fpath)
+            # 自己发的也要显示缩略图
+            self._img_executor.submit(self._proc_img, self.my_name, fpath)
             self._bc_raw(b"IMG:" + f"{len(data):<8}".encode() + data)
         except Exception as e:
             self.log(f"❌ 发送失败: {e}")
