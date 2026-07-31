@@ -22,7 +22,8 @@ logging.basicConfig(filename=os.path.join(BASE(), "lan_chat.log"),
 logging.info("="*40 + "\nLAN Chat v3 启动")
 
 
-def recv_n(sock, n, timeout=3):
+def recv_n(sock, n, timeout=None):
+    """接收精确 n 字节。timeout=None 表示阻塞等待（用于等待下一条消息）"""
     sock.settimeout(timeout)
     buf = b""
     try:
@@ -104,6 +105,12 @@ class LanChat:
         self.online_lb = tk.Label(info, text="👥 0人", fg="#888")
         self.online_lb.pack(side="right")
 
+        # 在线用户持久显示（聊天区上方）
+        self.ulb = tk.Label(root, text="", fg="#58a6ff", anchor="w",
+            font=("Consolas", 9), justify="left", bg="#10141a",
+            padx=6, pady=4)
+        self.ulb.pack(fill="x", padx=8, pady=(2, 0))
+
         # 聊天区（可拖拽）
         self.pw = tk.PanedWindow(root, orient=tk.VERTICAL, sashwidth=6,
                                   sashrelief=tk.RAISED, bg="#333")
@@ -122,9 +129,6 @@ class LanChat:
         self.input.bind("<Return>", lambda e: self.send() or "break")
         self.input.bind("<Shift-Return>", lambda e: None)
         self.pw.add(bf, height=100)
-
-        self.ulb = tk.Label(root, text="", fg="#888", anchor="w", font=("", 9))
-        self.ulb.pack(fill="x", padx=8)
 
         emo = tk.Frame(root); emo.pack(fill="x", padx=8, pady=(0, 2))
         for e in "😂😅😏😎😭😡👍🔥💀🎉🦞":
@@ -179,12 +183,14 @@ class LanChat:
         except: pass
 
     def _upd_users(self):
-        lines = [f"{self.my_name} (我)"]
+        my_ip = get_local_ip()
+        lines = [f"👥 在线 {len(self.peers)+1} 人"]
+        lines.append(f"  📍 {self.my_name} (我) {my_ip}")
         with self.lock:
             for p in self.peers.values():
-                lines.append(f"{p['name']} ({p['ip']})")
-        self.ulb.config(text="👥 " + " | ".join(lines))
-        self.online_lb.config(text=f"👥 {len(lines)}人")
+                lines.append(f"  👤 {p['name']} ({p['ip']})")
+        self.ulb.config(text="\n".join(lines))
+        self.online_lb.config(text=f"👥 {len(self.peers)+1}人")
 
     # ==================== 主开关 ====================
     def toggle(self):
@@ -242,35 +248,40 @@ class LanChat:
     def _handle(self, c, ip):
         c.settimeout(5)
         try:
-            d = recv_n(c, 4)
+            d = recv_n(c, 4, 10)
             if d is None or d.decode() != "NICK": c.close(); return
-            nl = int(recv_n(c, 4).decode().strip())
-            nm = recv_n(c, nl).decode()
+            nl = int(recv_n(c, 4, 10).decode().strip())
+            nm = recv_n(c, nl, 10).decode()
             c.sendall(b"OK")
             # 把自己的名字也发过去，让客户端能显示
             nb = self.my_name.encode()
             c.sendall(f"{len(nb):<4}".encode() + nb)
-            with self.lock: self.peers[c] = {"name": nm, "ip": ip}
-            self.root.after(0, lambda: self.log(f"🔗 {nm}({ip}) 加入了"))
+
+            # 去重：同一 IP 已有连接则关闭新连接
+            with self.lock:
+                dup = any(p["ip"] == ip for p in self.peers.values())
+                if dup:
+                    c.close()
+                    return
+                self.peers[c] = {"name": nm, "ip": ip}
             self.root.after(0, self._upd_users)
-            self._bc(f"💬 {nm} 加入了群聊", c)
 
             while self.running:
-                h = recv_n(c, 4)
+                h = recv_n(c, 4)  # 阻塞等消息，不超时
                 if h is None: break
                 t = h.decode()
                 if t == "MSG:":
-                    sz = int(recv_n(c, 8).decode().strip())
-                    b = recv_n(c, sz)
+                    sz = int(recv_n(c, 8, 10).decode().strip())
+                    b = recv_n(c, sz, 10)
                     if b is None: break
                     txt = b.decode()
                     self.root.after(0, lambda n=nm, x=txt: self.msg_in(n, x))
                     self._bc(f"{nm}:{txt}", c)
                 elif t == "IMG:":
-                    sz = int(recv_n(c, 8).decode().strip())
+                    sz = int(recv_n(c, 8, 10).decode().strip())
                     remain, chk = sz, []
                     while remain > 0:
-                        ck = recv_n(c, min(BUFFER, remain))
+                        ck = recv_n(c, min(BUFFER, remain), 10)
                         if ck is None: break
                         chk.append(ck); remain -= len(ck)
                     if remain == 0:
@@ -282,8 +293,7 @@ class LanChat:
         finally:
             with self.lock:
                 if c in self.peers:
-                    nm = self.peers.pop(c)["name"]
-                    self.root.after(0, lambda n=nm: self.log(f"🔌 {n} 离开了"))
+                    self.peers.pop(c)
                     self.root.after(0, self._upd_users)
             try: c.close()
             except: pass
@@ -295,24 +305,28 @@ class LanChat:
             s.settimeout(3)
             s.connect((ip, PORT))
             s.settimeout(None)
+            # 去重
+            with self.lock:
+                if any(p["ip"] == ip for p in self.peers.values()):
+                    s.close()
+                    return
             nb = self.my_name.encode()
             s.sendall(b"NICK" + f"{len(nb):<4}".encode() + nb)
-            if recv_n(s, 2) is None:
+            if recv_n(s, 2, 10) is None:
                 s.close(); return
             # 读取服务端的用户名
-            nl = int(recv_n(s, 4).decode().strip())
-            nm = recv_n(s, nl).decode()
+            nl = int(recv_n(s, 4, 10).decode().strip())
+            nm = recv_n(s, nl, 10).decode()
             with self.lock: self.peers[s] = {"name": nm, "ip": ip}
-            self.root.after(0, lambda: self.log(f"🔗 已连接 {ip}"))
             self.root.after(0, self._upd_users)
 
             while self.running:
-                h = recv_n(s, 4)
+                h = recv_n(s, 4)  # 阻塞等消息
                 if h is None: break
                 t = h.decode()
                 if t == "MSG:":
-                    sz = int(recv_n(s, 8).decode().strip())
-                    b = recv_n(s, sz)
+                    sz = int(recv_n(s, 8, 10).decode().strip())
+                    b = recv_n(s, sz, 10)
                     if b is None: break
                     txt = b.decode()
                     if ":" in txt:
@@ -321,14 +335,14 @@ class LanChat:
                     else:
                         self.root.after(0, lambda c=txt: self.log(f"💬 {c}"))
                 elif t == "IMG:":
-                    sz = int(recv_n(s, 8).decode().strip())
+                    sz = int(recv_n(s, 8, 10).decode().strip())
                     remain, chk = sz, []
                     while remain > 0:
-                        ck = recv_n(s, min(BUFFER, remain))
+                        ck = recv_n(s, min(BUFFER, remain), 10)
                         if ck is None: break
                         chk.append(ck); remain -= len(ck)
                     if remain == 0:
-                        self._handle_img("?", b"".join(chk))
+                        self._handle_img(nm, b"".join(chk))
             with self.lock:
                 if s in self.peers: self.peers.pop(s)
             self.root.after(0, self._upd_users)
