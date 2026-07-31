@@ -15,12 +15,12 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     upx_exclude=[
-        'python*.dll',   # UPX 压缩 python DLL 会导致 "failed to load python dll"
-        'tk*.dll',       # tkinter DLL 同理
-        'tcl*.dll',
-        'api-ms-win-*',
-        'vcruntime*.dll',
-        'ucrtbase.dll',
+        '*python312.dll',  # UPX 压缩 python DLL 会导致 "failed to load python dll"
+        '*tk*.dll',
+        '*tcl*.dll',
+        '*vcruntime*.dll',
+        '*ucrtbase.dll',
+        '*api-ms-win-*',
     ],
     excludes=[
         # 用不到的 PIL 功能模块（保留全部图片格式插件，必须能显示 png/jpg）
@@ -64,7 +64,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=True,          # 去掉符号表
-    upx=True,            # UPX 压缩（python/tk DLL 已在 Analysis 排除）
+    upx=False,           # UPX 压缩 python DLL 会损坏导致无法启动，关闭
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
